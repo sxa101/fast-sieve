@@ -65,9 +65,50 @@ __device__ __forceinline__ int isunit(unsigned char r) {
   return (r == 1 || r == 7 || r == 11 || r == 13 || r == 17 || r == 19 || r == 23 || r == 29);
 }
 
-__global__ void gsieve(const u32* prim, u32 np, unsigned long long top,
-                       unsigned long long* counters,
-                       unsigned char* dump = 0, unsigned int dumpBlock = 0) {
+/* Division by reciprocal-multiply: a / p with m = floor(2^64 / p) precomputed
+   on the host. mulhi(a,m) is q-1 or q (error a*e/2^64 < e < p), so exactly one
+   conditional correction recovers the exact quotient. Replaces the two
+   software u64 divisions per sieving prime per block (the measured hot spot). */
+__device__ __forceinline__ unsigned long long divf_m(unsigned long long a, u32 p,
+                                                     unsigned long long m) {
+  unsigned long long q = __umul64hi(a, m);
+  if (a - q * (unsigned long long)p >= (unsigned long long)p) q++;
+  return q;
+}
+
+#define GSIEVE_CHUNK 2048u   /* primes per shared-memory chunk (8 KiB) */
+
+/* v3 kernel: phase-split crossing, v1 memory layout (16 KiB shared/CTA -> 6
+   CTAs/SM). Measured lesson (gsieve2, K blocks/CTA + chunked prime list): the
+   scan amortization does NOT pay for the occupancy it costs (1e11: 32.8 s vs
+   14.7 s). The real waste is SIMT-serial scanning of ~sqrt(segEnd) primes per
+   block with idle lanes for p > 491520/256 = 1920:
+     phase 1 (p < 1920, ~296 primes): cooperative lane-strided q-loop;
+     phase 2 (1920 <= p <= sqrt(segEnd+1)): ONE prime per lane - the scan is
+       256x parallel and no lane idles; each lane crosses its primes' few
+       multiples directly (same atomicAnd bit-clear as phase 1).
+   A per-block binary search bounds the active prime set (pp <= segEnd+1). */
+__device__ __forceinline__ void clear_mult(unsigned char* seg, unsigned long long v,
+                                           unsigned long long segLow) {
+  if (v >= segLow + 7 && v < segLow + (unsigned long long)30 * SEG_BYTES + 2) {
+    unsigned char r = (unsigned char)(v % 30);
+    if (isunit(r)) {
+      unsigned long long idx = (v - segLow) / 30;
+      if (r == 1) idx -= 1;      /* residue 1 lives at offset 31 = one byte earlier */
+      if (idx < SEG_BYTES) {
+        u32 wi = (u32)idx >> 2;
+        u32 by = (u32)idx & 3;
+        u32 wordMask = ~(((u32)1u << bitidx(r)) << (8 * by));
+        atomicAnd((u32*)&seg[wi << 2], wordMask);
+      }
+    }
+  }
+}
+
+__global__ void __launch_bounds__(256, 6)
+gsieve(const u32* prim, const unsigned long long* pm, u32 np, u32 p1idx,
+       unsigned long long top, unsigned long long* counters,
+       unsigned char* dump = 0, unsigned int dumpBlock = 0) {
   const u32 gid = blockIdx.x;
   const u32 lid = threadIdx.x;
   const u32 L   = blockDim.x;
@@ -78,30 +119,39 @@ __global__ void gsieve(const u32* prim, u32 np, unsigned long long top,
   for (u32 i = lid; i < SEG_BYTES; i += L) seg[i] = 0xFF;
   __syncthreads();
 
-  for (u32 pi = 0; pi < np; pi++) {
-    u32 p = prim[pi];
+  /* lo = number of active sieving primes: prim[0..lo) have p*p <= segEnd+1 */
+  u32 lo = 0, hi = np;
+  while (lo < hi) {
+    const u32 mid = (lo + hi) >> 1;
+    if ((unsigned long long)prim[mid] * prim[mid] <= segEnd + 1) lo = mid + 1;
+    else hi = mid;
+  }
+
+  /* phase 1: small primes, cooperative q-strides over all 256 lanes */
+  const u32 lim1 = (p1idx < lo) ? p1idx : lo;
+  for (u32 pi = 0; pi < lim1; pi++) {
+    const u32 p = prim[pi];
     if (p < 7) continue;
-    unsigned long long pp = (unsigned long long)p * p;
-    if (pp > segEnd + 1) break;
-    unsigned long long v0 = (pp > segLow + 7) ? pp : segLow + 7;
-    unsigned long long q0 = (v0 + p - 1) / p;
-    unsigned long long qmax = (segEnd + 1) / p;
-    for (unsigned long long q = q0 + lid; q <= qmax; q += L) {
-      unsigned long long v = p * q;
-      if (v >= segLow + 7 && v < segEnd + 2) {
-        unsigned char r = (unsigned char)(v % 30);
-        if (isunit(r)) {
-          unsigned long long idx = (v - segLow) / 30;
-          if (r == 1) idx -= 1;    /* residue 1 lives at offset 31 = one byte earlier */
-          if (idx < SEG_BYTES) {
-            u32 wi = (u32)idx >> 2;
-            u32 by = (u32)idx & 3;
-            u32 wordMask = ~(((u32)1u << bitidx(r)) << (8 * by));
-            atomicAnd((u32*)&seg[wi << 2], wordMask);
-          }
-        }
-      }
-    }
+    const unsigned long long pp = (unsigned long long)p * p;
+    const unsigned long long mp = pm[pi];
+    /* q0 = ceil(v0/p); common case p*p >= segLow+7 gives v0 = pp -> q0 = p */
+    const unsigned long long q0 = (pp >= segLow + 7) ? (unsigned long long)p
+                                                     : divf_m(segLow + 6 + p, p, mp);
+    const unsigned long long qmax = divf_m(segEnd + 1, p, mp);
+    for (unsigned long long q = q0 + lid; q <= qmax; q += L)
+      clear_mult(seg, p * q, segLow);
+  }
+
+  /* phase 2: large primes, one prime per lane, multiples crossed serially */
+  for (u32 pi = p1idx + lid; pi < lo; pi += L) {
+    const u32 p = prim[pi];
+    const unsigned long long pp = (unsigned long long)p * p;
+    const unsigned long long mp = pm[pi];
+    const unsigned long long q0 = (pp >= segLow + 7) ? (unsigned long long)p
+                                                     : divf_m(segLow + 6 + p, p, mp);
+    const unsigned long long qmax = divf_m(segEnd + 1, p, mp);
+    for (unsigned long long q = q0; q <= qmax; q++)
+      clear_mult(seg, p * q, segLow);
   }
   __syncthreads();
 
@@ -172,20 +222,34 @@ extern "C" GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* sec
   u64* pl = simple_primes(root, &np_);
   if (!pl) return res;
   u32* prime32 = (u32*)malloc(sizeof(u32) * (size_t)(np_ ? np_ : 1));
-  if (!prime32) { free(pl); return res; }
-  for (u64 i = 0; i < np_; i++) prime32[i] = (u32)pl[i];
+  unsigned long long* magic = (unsigned long long*)malloc(sizeof(unsigned long long) * (size_t)(np_ ? np_ : 1));
+  if (!prime32 || !magic) { free(pl); free(prime32); free(magic); return res; }
+  for (u64 i = 0; i < np_; i++) {
+    prime32[i] = (u32)pl[i];
+    magic[i] = ~0ull / (u64)pl[i];   /* floor((2^64-1)/p) = floor(2^64/p) here */
+  }
   free(pl);
+  /* phase split threshold: primes below this keep the cooperative q-stride;
+     T = GPU_BLOCK_VALS / 256 lanes = 1920 (larger primes go one-per-lane) */
+  const u32 PHASE1_P = GPU_BLOCK_VALS / 256u;
+  u32 p1idx = 0;
+  while (p1idx < (u32)np_ && prime32[p1idx] < PHASE1_P) p1idx++;
 
   const u64 nblocks = (top + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
 
   u32* dP = 0;
+  unsigned long long* dM = 0;
   unsigned long long* dC = 0;
-  if (cudaMalloc(&dP, np_ * 4) != cudaSuccess) { free(prime32); return res; }
+  if (cudaMalloc(&dP, np_ * 4) != cudaSuccess) { free(prime32); free(magic); return res; }
+  if (cudaMalloc(&dM, np_ * 8) != cudaSuccess) {
+    cudaFree(dP); free(prime32); free(magic); return res;
+  }
   if (cudaMalloc(&dC, nblocks * 8) != cudaSuccess) {
-    cudaFree(dP); free(prime32); return res;
+    cudaFree(dP); cudaFree(dM); free(prime32); free(magic); return res;
   }
   cudaMemcpy(dP, prime32, np_ * 4, cudaMemcpyHostToDevice);
-  free(prime32);
+  cudaMemcpy(dM, magic, np_ * 8, cudaMemcpyHostToDevice);
+  free(prime32); free(magic);
 
   cudaEvent_t ev0, ev1;
   cudaEventCreate(&ev0); cudaEventCreate(&ev1);
@@ -202,8 +266,8 @@ extern "C" GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* sec
   }
 
   cudaEventRecord(ev0);
-  gsieve<<<(unsigned)nblocks, 256>>>(dP, (u32)np_, (unsigned long long)top, dC,
-                                     dDump, dumpBlock);
+  gsieve<<<(unsigned)nblocks, 256>>>(dP, dM, (u32)np_, p1idx,
+                                     (unsigned long long)top, dC, dDump, dumpBlock);
   cudaEventRecord(ev1);
   cudaError_t err = cudaGetLastError();
   if (err == cudaSuccess) err = cudaEventSynchronize(ev1);
@@ -215,7 +279,7 @@ extern "C" GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* sec
   cudaEventDestroy(ev0); cudaEventDestroy(ev1);
 
   if (err != cudaSuccess || !block_counts) {
-    cudaFree(dP); cudaFree(dC);
+    cudaFree(dP); cudaFree(dM); cudaFree(dC);
     return res;
   }
   err = cudaMemcpy(block_counts, dC, nblocks * 8, cudaMemcpyDeviceToHost);
@@ -228,7 +292,7 @@ extern "C" GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* sec
             dumpBlock, fn, (unsigned long long)block_counts[dumpBlock]);
     cudaFree(dDump); free(hDump);
   }
-  cudaFree(dP); cudaFree(dC);
+  cudaFree(dP); cudaFree(dM); cudaFree(dC);
   if (err != cudaSuccess) return res;
 
   res.ok = 1;

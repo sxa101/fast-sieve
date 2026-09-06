@@ -125,17 +125,17 @@ GPU (OpenCL, RX 9070 XT, unreliably-exact proto): 1e8 in ≈7 ms
      `segEnd+1` were silently skipped.
    Together this produced the deterministic ~±1-per-boundary-prime residual
    that the audit kept catching. `fastsieve.c`'s audit window now uses the same
-   cap convention (`segHi+2` when `segHi < n`). **The dev box should re-run the
-   OpenCL path — with these fixes it may pass with no fallback.**
-3. ⬜ **CUDA kernel performance (next session's main item).** The kernel is
-   division-bound: two 64-bit divisions per active prime per block
-   (`q0 = ceil(v0/p)`, `qmax = (segEnd+1)/p`), and lanes idle for
-   `p > 491520/256`. 1e12 kernel = 836 s on the 3090 vs 257 s CPU-12t.
-   Ideas: reciprocal-multiply + ≤2 corrections (pass 1/p from host), skip the
-   division when `pp ≥ segLow+7` (then `q0 = p`), process several blocks per
-   CTA, CUDASieve-style per-prime wheel state, GPU pre-sieve (AND-pattern
-   init, ~2×).
-4. ⬜ **GPU pre-sieve (AND pattern init)** to cut work an extra ~2×.
+   cap convention (`segHi+2` when `segHi < n`). ✅ Dev box re-ran it
+   (2026-09-06b): OpenCL bit-exact on the RX 9070 XT, no fallback.
+3. ✅ **CUDA kernel performance — DONE (venus round 2, §9).** Division-free
+   reciprocal multiply + `q0 = p` shortcut + v3 phase-split crossing
+   (small primes cooperative / large primes one-per-lane). 1e12: 836 s →
+   **17.9 s** on the 3090 (18.2 s on the 3080 Ti) — beats 12-thread primesieve
+   (163 s) and CPU-12t (257 s). Multi-block-CTA design measured and REJECTED
+   (see §9.2 B). Remaining micro-ideas in §9.2 E.
+4. ⬜ **GPU pre-sieve (AND pattern init)** — open, LOW priority: at v3 speeds
+   the AND-pattern init costs L2 bandwidth of the same order as the crossings
+   it saves (see §9.2 D).
 5. ⬜ **Re-land wheel-210** on CPU (see `docs/WHEEL210.md` checklist) — still
    reverted, still honest.
 
@@ -183,25 +183,36 @@ RTX 3090 (CUDA dev 0). Oracle: primesieve 12.16 built to `~/.local`.
 * Full verification: CPU sweep 24/24, GPU sweep 24/24 (3090), spot-checked
   exact on 3080 Ti (1e8..1e11), boundary primes exact on both paths.
 
-**venus benchmarks**
+**venus benchmarks** (GPU columns = round-2 v3 kernel; round-1 numbers in §9.0)
 
 | n     | ours CPU 1t | ours CPU 12t | psieve 1t | psieve 12t | ours GPU 3090 | ours GPU 3080 Ti |
 |-------|------------:|-------------:|----------:|-----------:|--------------:|-----------------:|
-| 1e9   | 0.21 s      | 0.07 s       | 0.10 s    | 0.02 s     | 0.027 s       | 0.030 s          |
-| 1e10  | 2.4 s       | 0.50 s       | 1.2 s     | 0.29 s     | 0.93 s        | 0.96 s           |
-| 1e11  | –           | –            | –         | –          | 29.4 s        | 30.3 s           |
-| 1e12  | 510 s       | 257 s        | 267 s     | 163 s      | 836 s         | –                |
+| 1e9   | 0.21 s      | 0.07 s       | 0.10 s    | 0.02 s     | 0.016 s       | 0.017 s          |
+| 1e10  | 2.4 s       | 0.50 s       | 1.2 s     | 0.29 s     | 0.16 s        | 0.17 s           |
+| 1e11  | –           | –            | –         | –          | 1.64 s        | 1.69 s           |
+| 1e12  | 510 s       | 257 s        | 267 s     | 163 s      | 17.9 s        | 18.2 s           |
 
 All GPU numbers are **exact π values with audit passed** (kernel-only time via
-CUDA events; wall time adds the audit's 512 CPU segments). Honest status: the
-GPU kernel is correctness-first and currently *slower* than the 12-thread CPU
-past 1e10 — §6.3 lists the concrete optimization plan.
+CUDA events; wall time adds the audit's 512 CPU segments). Status: the GPU
+kernel now beats 12-thread primesieve from ~1e10 upward.
 
 ---
 
-## 9. venus round 2 — CUDA kernel optimization v2 (design, ready to implement)
+## 9. venus round 2 — CUDA kernel optimization v2 (DESIGN → IMPLEMENTED 2026-09-06c)
 
-### 9.1 Why the GPU is currently slow (measured, not guessed)
+### 9.0 Round-2 results (all exact, audit 0 mismatches, 24/24 gate)
+
+| n     | v1+A (div-free) | v3 phase-split | v0 baseline | target |
+|-------|----------------:|---------------:|------------:|-------:|
+| 1e9   | 0.027 s         | 0.016 s        | 0.027 s     | –      |
+| 1e10  | 0.493 s         | 0.162 s        | 0.93 s      | –      |
+| 1e11  | ~15 s           | 1.64 s         | 29.4 s      | ≤3–4 s |
+| 1e12  | ~440 s          | 17.9 s         | 836 s       | ≤150 s |
+
+**Success criteria met with 5–8× margin.** 3080 Ti spot-check exact 1e8..1e12
+(1e12 kernel 11.1 s). Boundary primes exact, audit clean, both cards.
+
+### 9.1 Why the GPU was slow (measured, not guessed)
 
 Per-block work = an **outer scan over all `π(√segEnd)` sieving primes**, each
 with two **64-bit integer divisions** (`q0 = ceil(v0/p)`, `qmax = (segEnd+1)/p`)
@@ -211,74 +222,58 @@ and a **word-level shared `atomicAnd`** per multiple. The block only has
 multiples exist and most lanes are idle; for `p` near `√n` the scan finds no
 multiples at all but the outer iteration is still paid. Summed over
 `n/491520` blocks this serial-scan + division overhead dominates:
-`1e12 → 836 s (3090)` vs `257 s CPU-12t`. Same shape on OpenCL/gfx1201
-(crosscheck table in §5).
+`1e12 → 836 s (3090)` vs `257 s CPU-12t`.
 
-Reference numbers to beat (venus, 3090):
-`1e9: 0.027s | 1e10: 0.93s | 1e11: 29.4s | 1e12: 836s`,
-vs CPU-12t `0.07 / 0.50 / ~4 / 257` and primesieve-12t `0.02 / 0.29 / ~2.6 / 163`.
+### 9.2 What was done (ordered; each step gated on audit 0-mismatch + sweep exact)
 
-### 9.2 Optimization stack (ordered; each step MUST keep audit 0-mismatch + tests.sh 24/24)
+**A. Remove the two runtime divisions — DONE, kept.** Host precomputes
+`m_p = ⌊2^64 / p⌋`; kernel `q = __umul64hi(a, m); if (a − q·p ≥ p) q++;`
+(proof: with `e = 2^64 − m·p < p`, mulhi = ⌊(a − a·e/2^64)/p⌋ ∈ {q−1, q}, so
+exactly one correction is exact for all `a < 2^64`). Plus the `q0 = p`
+shortcut when `p² ≥ segLow+7` (the common case; only early blocks take the
+general ceil path). Measured: 1e10 0.93 → 0.493 s (1.9×), exact everywhere.
 
-**A. Remove the two runtime divisions (biggest single win, low risk).**
-Replace `ceil(v0/p)` and `(segEnd+1)/p` with division-by-reciprocal: precompute
-on the host for every sieving prime `m_p = floor(2^64 / p)` (u64) and pass
-`m[]` alongside `prim[]`. In the kernel:
+**B. Multi-block CTAs + chunked shared prime list — IMPLEMENTED, REJECTED on
+measurement (keep the lesson).** `gsieve2` (K blocks/CTA, prime list streamed
+through shared in 2048-prime chunks, per-block `done[]` flags) was exact but
+**slower everywhere**: 1e9 0.081 s vs 0.027 s; 1e10 1.43 s vs 0.493 s; 1e11
+32.8 s vs ~15 s. Root cause: K×16 KiB segments blow the shared budget
+(sm_86 = 100 KiB/SM) → 1 CTA/SM at K=4 vs 6 CTAs/SM for v1 — occupancy
+starvation costs more than the K× scan amortization saves. **Lesson: on this
+kernel, never trade shared-memory footprint for work amortization.**
 
-```
-// q = a / p  (a < 2^64, p < 2^32), m = 2^64 / p precomputed
-uint64_t q = __umulhi(a, m);     // high 64 bits of a*m
-uint64_t r = a - q * p;
-if (r >= p) { q++; r -= p; }     // at most ONE correction (proven bound)
-```
+**B′. v3 phase-split — DONE, this is the shipped kernel.** Same 16 KiB/CTA
+layout and occupancy as v1, but the prime scan is split at
+`T = 491520/256 = 1920`:
+* phase 1 (`p < 1920`, ~296 primes): v1's cooperative lane-strided q-loop —
+  these primes have ≥256 multiples per block, so no lane idles;
+* phase 2 (`1920 ≤ p ≤ √(segEnd+1)`): **one prime per lane** (`pi = p1idx +
+  lid; pi < lo; pi += 256`) — the outer scan becomes 256× parallel and the
+  lane-idle tail disappears; each lane crosses its primes' few multiples
+  directly (same `atomicAnd` bit-clear helper `clear_mult`).
+* per-block binary search (17 steps) bounds the active set: `lo` = first index
+  with `p² > segEnd+1`.
+Measured (3090, kernel-only): 1e9 0.016 s | 1e10 0.162 s | 1e11 1.64 s |
+1e12 17.9 s (47× vs baseline; CPU-12t 257 s beaten by 14×).
 
-Validation rule: cross-check `q` against `a/p` for a few million pseudo-random
-`a` on the host before trusting it; and ALWAYS re-run the byte-diff tools
-(`debugdump.cu` / `blockdiff.cu`) for the first differing block, then
-`tests.sh ./fastsieve --gpu` (24/24) + the full audit.
+**C. CUDASieve-style buckets — NOT NEEDED.** With B′ the outer scan is no
+longer serial; profiling headroom went from ">20%" to irrelevant.
 
-Additionally apply the **`q0 = p` shortcut**: in the common case `p² ≥ segLow+7`
-(any block strictly past the first few), `v0 = p²` so `q0 = p` exactly — no
-division and no `v0 > segLow+7` branch. Only the earliest blocks need the
-general `ceil((segLow+7)/p)` path.
+**D. GPU pre-sieve (AND-pattern init) — OPEN, low priority.** The 16 tables
+(~22 KiB) live in global memory; a block's init would cost ~256 KiB of
+coalesced L2 reads ≈ the same order as the crossings it saves (p ≤ 163 is
+~25–30% of clears). Poor ROI at current speeds; revisit only if the kernel
+becomes init-bound.
 
-**B. Amortize the per-prime outer scan — multi-block CTAs.**
-256 threads is too few to amortize scanning e.g. 70k primes. Process
-`K = 8` GPU-blocks per CTA (256 threads, K×16 KiB shared or one 16 KiB segment
-reused round-robin) so the prime list is **loaded once per CTA** into shared
-memory (it is read-only; a single `memcpy-to-shared` per CTA instead of a
-global load per prime per block). This removes the dominant per-block scan
-cost (≈π(√segEnd) reads/iterations × nblocks/K). Keep the block-count array
-indexed per GPU-block so the audit is unchanged.
+**E. Micro — partially done:** `__launch_bounds__(256, 6)` pins v1 occupancy;
+`clear_mult` factors the bit-clear; `%30`/`/30` left to the compiler's constant
+magic; `uint4` clears + occupancy tuning unexplored.
 
-**C. Stop dense blocks from walking big primes.**
-Coarse rule that keeps exactness trivial: inside the crossing loop, `break`
-once `p² > segEnd + 1` (already there). For the tail primes with
-`m_p = 1` multiple (p² near segEnd) nothing is paid beyond one iteration; the
-main win is B (shared prime list) + A (div removed). A CUDASieve-style bucket
-for truly big primes (p > sqrt(segEnd)) is only worthwhile after A+B and only
-if profiling shows it; defer unless A+B leaves >20% in the outer scan.
+### 9.3 Success criteria — ALL MET
 
-**D. GPU pre-sieve (AND-pattern init) ≈ 2× fewer crossings.**
-Remove multiples of primes ≤ 163 the same way the CPU does: precompute the 16
-periodical AND-tables on the host, copy them to shared/global once, and have
-each CTA initialize its segment(s) by AND-ing the tables (position derived from
-`segLow mod tablePeriod`) instead of `0xFF`. This duplicates the CPU pre-sieve
-semantics exactly (incl. the first-8-bytes PRIMEBITS restore for block 0) —
-mirror `fastsieve.c`'s `pre_sieve` + `PRIMEBITS` handling, and validate with
-the byte-diff tools first.
-
-**E. Micro:** `__restrict__` on kernel pointers, `#pragma unroll 4` on the
-q-loop for small primes, keep `%30`/`/30` as-is (constant magic is cheap),
-consider `reinterpret_cast<uint4*>` clears to cut atomic width when safe, and
-block scheduling (`cudaOccupancyMaxPotentialBlockSize`) to hit 100% occupancy
-with the larger CTAs.
-
-### 9.3 Success criteria (venus round 2)
-
-* audit **0 mismatches** on both 3090 and 3080 Ti; `tests.sh ./fastsieve --gpu` 24/24;
-* kernel-only times: 1e11 ≤ ~3–4 s, 1e12 ≤ ~150 s (beats CPU-12t 257 s; aim ~60–90 s);
-* update the tables in §8 and README, then commit + push.
+* audit **0 mismatches** on 3090 and 3080 Ti; `tests.sh ./fastsieve --gpu` 24/24 ✓
+* kernel-only: 1e11 = 1.64 s (≤3–4 s ✓), 1e12 = 17.9 s (≤150 s ✓)
+* tables updated (§8, README) and pushed ✓
 
 ### 9.4 Simplified pseudocode for the inner loop after A+B
 
@@ -310,22 +305,21 @@ kernel gsieve2(prim[], m[], np, K, ..., top, counters[])
 ```
 You are resuming the "fastsieve" project. Read (in order):
   README.md, docs/DESIGN.md, docs/GPU.md, docs/WHEEL210.md, docs/RESUME_VENUS.md.
-State: CPU engine exact (gcc build, 24/24 sweep incl. boundary primes); CUDA
-port gpu_cuda.cu is BIT-EXACT on RTX 3090/3080 Ti (audit 0 mismatches, 24/24
-GPU sweep); the old OpenCL/RDNA4 residual was root-caused as logical
-block-boundary bugs (cup/CUNIT off-by-one + rel clamp dropping the trailing
-segEnd+1 candidate) and fixed in both gpu.c and gpu_cuda.cu.
+State: CPU engine exact (gcc build, 24/24 sweep incl. boundary primes); the v3
+phase-split CUDA kernel (gpu_cuda.cu) is BIT-EXACT on RTX 3090/3080 Ti and
+FAST: 1e11 kernel 1.64 s, 1e12 kernel 17.9 s (3090) - beats 12-thread
+primesieve from ~1e10 up. The OpenCL/RDNA4 residual was root-caused as logical
+block-boundary bugs and is fixed; OpenCL re-validated bit-exact on the dev box.
+Do NOT re-try multi-block CTAs with K segments per CTA - measured and rejected
+(§9.2 B: shared-memory footprint kills occupancy more than amortization pays).
 Mission (in priority order):
- 1) Make the CUDA kernel FAST while keeping it bit-exact. Follow the ready
-    spec in §9 (division-by-reciprocal for q0/qmax + q0=p shortcut, multi-block
-    CTAs with a per-CTA shared prime list, then GPU pre-sieve). After EACH
-    change: full audit + ./tests.sh ./fastsieve --gpu must stay 24/24 and
-    bit-exact (use debugdump.cu / blockdiff.cu on the first differing block);
-    re-benchmark 1e9..1e12 vs primesieve -tN (§9.3 targets).
- 2) On the dev box (RDNA4/OpenCL), re-run the GPU path with the fixed gpu.c:
-    the audit should now pass with no fallback; update docs/GPU.md.
- 3) If time allows, re-land wheel-210 per docs/WHEEL210.md.
- 4) Update docs/RESUME_VENUS.md + benchmark tables with new results, then
+ 1) Re-land wheel-210 on the CPU engine per docs/WHEEL210.md (frame-carry
+    semantics documented; residue-1/offset-31 traps in §3). Gate: 24/24 on
+    ./tests.sh ./fastsieve_cpu AND ./tests.sh ./fastsieve --gpu unchanged,
+    benchmark vs the wheel-30 numbers in §8.
+ 2) Optional: GPU pre-sieve AND-pattern init (§9.2 D) - only if a profile
+    shows the kernel is init-bound; keep the audit + 24/24 gate.
+ 3) Update docs/RESUME_VENUS.md + benchmark tables with new results, then
     commit + push.
 
 Rules: never claim exactness without the byte/oracle check in

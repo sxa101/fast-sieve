@@ -101,17 +101,18 @@ from our runtime-generated tables. That is the single declared gap.
 
 | n     | ours CPU 1t | ours CPU 12t | primesieve 1t | primesieve 12t | ours GPU (kernel) |
 |-------|------------:|-------------:|--------------:|---------------:|------------------:|
-| 1e9   | 0.21 s      | 0.07 s       | 0.10 s        | 0.02 s         | 0.027 s           |
-| 1e10  | 2.4 s       | 0.50 s       | 1.2 s         | 0.29 s         | 0.93 s            |
-| 1e11  | –           | –            | –             | –              | 29.4 s            |
-| 1e12  | 510 s       | 257 s        | 267 s         | 163 s          | 836 s             |
+| 1e9   | 0.21 s      | 0.07 s       | 0.10 s        | 0.02 s         | 0.016 s           |
+| 1e10  | 2.4 s       | 0.50 s       | 1.2 s         | 0.29 s         | 0.16 s            |
+| 1e11  | –           | –            | –             | –              | 1.6 s             |
+| 1e12  | 510 s       | 257 s        | 267 s         | 163 s          | 17.9 s            |
 
 The CUDA kernel is **bit-exact** (audit passes everywhere), and the fixed
 OpenCL kernel is now also bit-exact on the RX 9070 XT (audit passes, no
-fallback). The straight/second straight kernels are division-bound (two 64-bit
-divisions per sieving prime per block) and only beat the CPU below ~5×10⁸
-(GPU crossover) — a concrete optimization spec (reciprocal multiply, multi-block
-CTAs, pre-sieve) is in [docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md).
+fallback). The v3 phase-split kernel (division-free + one-prime-per-lane
+crossing of large primes, RTX 3090) is **faster than 12-thread primesieve from
+~1e10 upward** — 1e12 in 17.9 s vs 163 s, 47× faster than the initial port.
+Design, measurements and the rejected-alternatives log are in
+[docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md).
 
 ## License
 
