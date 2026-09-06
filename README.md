@@ -55,6 +55,19 @@ nvcc -O3 -arch=sm_86 -Xcompiler "-fopenmp -march=native -O3" \
 
 `tests.sh` needs the `primesieve` CLI on PATH (or `PRIMESIEVE=/path`).
 
+## C API
+
+The engine is callable from C through `fastsieve.h` (exact by construction:
+the audited GPU path falls back to CPU on any mismatch, so callers can never
+see a wrong count). Functions: `fastsieve_pi`, `fastsieve_count`,
+`fastsieve_isprime`, `fastsieve_nth_prime`, `fastsieve_generate` (ascending
+callback enumeration). Design notes: [docs/API.md](docs/API.md).
+
+```
+cl /O2 /arch:AVX2 /Oi /openmp fastsieve.c gpu.c your_program.c
+# or: build.bat also builds examples/api_demo.c (a self-check demo)
+```
+
 ## Usage
 
 ```

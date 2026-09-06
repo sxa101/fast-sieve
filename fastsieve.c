@@ -58,6 +58,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #ifdef _WIN32
 #include <intrin.h>
 #include <windows.h>
@@ -72,6 +73,15 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int64_t  i64;
 #define NO_NODE UINT32_MAX
+#include "fastsieve.h"
+
+/* Prime emit callback used by sieve_slice (null in pure-counting runs).
+ * Returning nonzero requests an early stop. */
+typedef int (*fs_emit_cb)(u64 prime, void* user);
+
+/* forward: shared core used by main() and the public API (defined below main) */
+static void ensure_tables(void);
+static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, double* gsec_out);
 /* ------------------------------------------------------------------ */
 /* Tuning (overridable at runtime)                                    */
 /* ------------------------------------------------------------------ */
@@ -470,7 +480,7 @@ static void prime_init_state(u64 p, u64 low, u32* outI, u8* outK, u8* outT)
   *outT = t;
 }
 static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 medMax,
-                       const u64* pl, u64 npl)
+                       const u64* pl, u64 npl, fs_emit_cb emit, void* emitCtx)
 {
   u64 logB = 0;
   while ((1ull << logB) < B) logB++;
@@ -483,6 +493,7 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
   while (gpos < npl && pl[gpos] <= PRESIEVE_MAX) gpos++;
   u64 total = 0;
   u64 segNo = 0;
+  int stopped = 0;
   for (u64 low = lo; low < cap; low += (u64)30 * B) {
     u64 end = low + (u64)30 * B;
     pre_sieve(sieve, B, low);
@@ -568,12 +579,43 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
       total += cbits_prefix(sieve, B, low, cap) - cbits_prefix(sieve, B, low, countLo);
     else
       total += count_segment(sieve, B, cap, low);
+    /* optional on-the-fly prime emission over the same window */
+    if (emit) {
+      u64 from = (countLo > low) ? countLo : low;
+      if (low == 0 && segNo == 0) {   /* primes 2,3,5 are outside the wheel */
+        static const u64 S3[3] = {2, 3, 5};
+        for (int pp2 = 0; pp2 < 3; pp2++)
+          if (from <= S3[pp2] && S3[pp2] < cap) {
+            if (emit(S3[pp2], emitCtx)) { stopped = 1; break; }
+          }
+      }
+      if (!stopped) {
+        u64 jmin = (from > low + 7) ? (from - low - 7) / 30 : 0;
+        u64 upv  = cap - 1;
+        u64 jmax = (upv > low + 7) ? (upv - low - 7) / 30 : 0;
+        if (jmax >= B) jmax = B - 1;
+        for (u64 j = jmin; j <= jmax; j++) {
+          u8 byte = sieve[j];
+          if (byte) {
+            static const u64 OFF[8] = {7, 11, 13, 17, 19, 23, 29, 31};
+            u64 base = low + 30 * j;
+            for (int b = 0; b < 8; b++)
+              if (byte & (1u << b)) {
+                u64 v = base + OFF[b];
+                if (v >= from && v < cap && emit(v, emitCtx)) { stopped = 1; break; }
+              }
+          }
+          if (stopped) break;
+        }
+      }
+    }
     segNo++;
     /* advance the bucket window */
     if (st.nhead > 0) {
       for (u64 x = 1; x < st.nhead; x++) st.head[x - 1] = st.head[x];
       st.nhead--;
     }
+    if (stopped) break;
   }
   free(st.sml); free(st.mdl); free(st.pend); free(st.head); free(st.nodes);
   free(sieve);
@@ -597,10 +639,9 @@ static double now_sec(void) {
 }
 #endif
 
+#ifndef FASTSIEVE_NO_MAIN
 int main(int argc, char** argv) {
-  build_cross_tables();
-  build_pre_sieve_tables();
-  build_count_tables();
+  ensure_tables();
   u64 n = 1000000000ULL;
   u64 B = DEFAULT_SIEVE_B;
   u64 glo = 0;
@@ -629,21 +670,69 @@ int main(int argc, char** argv) {
   if (n < 2) { printf("0\n"); return 0; }
   if (n > (u64)8e15) { fprintf(stderr, "n too large for this demo\n"); return 1; }
 
-  /* sieving primes <= sqrt(n) */
+  double t0 = now_sec();
+  u64 pi = 0;
+  if (glo > 0) {
+    u64 root = 1;
+    while ((root + 1) <= n / (root + 1)) root++;
+    u64* pl = NULL; u64 npl = 0;
+    simple_sieve(root, &pl, &npl);
+    u64 segStart = (glo > (u64)30 * B) ? glo - (u64)30 * B : 0;
+    pi = sieve_slice(segStart, glo, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
+    free(pl);
+    printf("pi([%llu, %llu]) = %llu\n", (unsigned long long)glo, (unsigned long long)n,
+           (unsigned long long)pi);
+    printf("Seconds: %.3f\n", now_sec() - t0);
+    return 0;
+  }
+  pi = fs_pi_core(n, nthreads, useGpu, B, medF, 0);
+
+  double sec = now_sec() - t0;
+  printf("pi(%llu) = %llu\n", (unsigned long long)n, (unsigned long long)pi);
+  printf("Seconds: %.3f\n", sec);
+  return 0;
+}
+#endif /* FASTSIEVE_NO_MAIN */
+
+/* ------------------------------------------------------------------ */
+/* Shared engine core + public C API                                    */
+/* ------------------------------------------------------------------ */
+static int g_tables_built = 0;
+
+static void ensure_tables(void) {
+  if (!g_tables_built) {
+    build_cross_tables();
+    build_pre_sieve_tables();
+    build_count_tables();
+    g_tables_built = 1;
+  }
+}
+
+void fastsieve_init(void) { ensure_tables(); }
+const char* fastsieve_version(void) { return "1.0.0"; }
+
+static void fs_resolve_cfg(long* threads, int* useGpu, u64* B, double* medF,
+                           const fastsieve_config* c) {
+  *threads = c ? c->threads : 0;
+  if (*threads <= 0) *threads = 1;
+  *useGpu = c ? !!c->use_gpu : 0;
+  u64 sb = c && c->sieve_bytes ? c->sieve_bytes : DEFAULT_SIEVE_B;
+  u64 r = 64;
+  while ((r << 1) <= sb) r <<= 1;
+  *B = r;
+  *medF = (c && c->med_factor > 0.0) ? c->med_factor : 3.0;
+}
+
+/* Number of primes <= n: shared entry for the CLI and the API. Exact; the GPU
+   result is audited against the CPU engine and falls back on any mismatch. */
+static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, double* gsec_out) {
+  u64 smallMax = (u64)(L1_BYTES * 0.2);
+  u64 medMax = (u64)((double)B * medF);
+  if (nthreads <= 0) nthreads = 1;
   u64 root = 1;
   while ((root + 1) <= n / (root + 1)) root++;
   u64* pl = NULL; u64 npl = 0;
   simple_sieve(root, &pl, &npl);
-
-  double t0 = now_sec();
-
-  u64 castpi = 0;
-  if (glo > 0) {
-    castpi = sieve_slice(glo > 0 ? glo - (u64)30 * B : 0, glo, n, B, smallMax, medMax, pl, npl);
-    printf("pi([%llu, %llu]) = %llu\n", (unsigned long long)glo, (unsigned long long)n,
-           (unsigned long long)castpi);
-    return 0;
-  }
   u64 span = (u64)30 * B;
   u64 nseg = (n + span - 1) / span;
   u64 slicesz = (u64)((nseg + (u64)nthreads - 1) / (u64)nthreads);
@@ -651,35 +740,34 @@ int main(int argc, char** argv) {
   u64 pi = 0;
   double gsec = 0;
   int gpuFellBack = 0;
+  u64 gpuTop = n + 1;   /* engine counts candidate values < cap -> include n */
   if (useGpu) {
-    u64 gb = (n + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
+    u64 gb = (gpuTop + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
     u64* bc = (u64*)calloc((size_t)gb, 8);
-    GpuResult r = gpu_sieve(n, bc, &gsec);
+    GpuResult r = gpu_sieve(gpuTop, bc, &gsec);
     if (r.ok) {
       u64 sum = 0;
       for (u64 i = 0; i < r.nblocks; i++) sum += bc[i];
-/* GPU audit: compare sampled CPU segments against the GPU blocks. */
       u64 mism = 0, aud = 0;
       if ((u64)30 * B % GPU_BLOCK_VALS != 0) { mism = 1; }
       else {
-        u64 csegs = n / ((u64)30 * B);
+        u64 csegs = gpuTop / ((u64)30 * B);
         u64 step = (csegs > 512) ? (csegs / 512U) : 1;
-        /* always include the first and the last CPU segment window */
         u64 aiList[1024]; u64 nc = 0;
         for (u64 ai = 0; ai < csegs && nc < 1023; ai += step) aiList[nc++] = ai;
-        if (nc == 0 || aiList[nc-1] != (csegs > 0 ? csegs - 1 : 0)) {
+        if (nc == 0 || aiList[nc - 1] != (csegs > 0 ? csegs - 1 : 0)) {
           if (nc < 1024) aiList[nc++] = csegs > 0 ? csegs - 1 : 0;
         }
         for (u64 x = 0; x < nc && aud < 512; x++) {
           u64 segLo = aiList[x] * (u64)30 * B;
           u64 segHi = segLo + (u64)30 * B;
-          if (segHi > n) segHi = n;
-          /* CPU audit window must use the same cap convention as the GPU
-             blocks: a full segment owns candidates up to segHi+1 (the
-             trailing offset-31 candidate), the final window counts < n. */
+          if (segHi > gpuTop) segHi = gpuTop;
+          /* CPU audit window uses the same cap convention as the GPU blocks:
+             a full segment owns candidates up to segHi+1 (trailing offset-31),
+             the final window counts < gpuTop (= values <= n). */
           u64 segCap = segHi + 2;
-          if (segCap > n) segCap = n;
-          u64 cpuCnt = sieve_slice(segLo, segLo, segCap, B, smallMax, medMax, pl, npl);
+          if (segCap > gpuTop) segCap = gpuTop;
+          u64 cpuCnt = sieve_slice(segLo, segLo, segCap, B, smallMax, medMax, pl, npl, 0, 0);
           u64 gpuCnt = 0;
           u64 k0 = segLo / GPU_BLOCK_VALS;
           u64 k1 = (segHi + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
@@ -696,7 +784,7 @@ int main(int argc, char** argv) {
                 (unsigned long long)aud, r.device, r.gpu_secs);
       } else {
         gpuFellBack = 1;
-	fprintf(stderr, "GPU audit: %llu mismatches - falling back to CPU\n",
+        fprintf(stderr, "GPU audit: %llu mismatches - falling back to CPU\n",
                 (unsigned long long)mism);
       }
     } else {
@@ -706,36 +794,115 @@ int main(int argc, char** argv) {
   }
   if (!useGpu || gpuFellBack) {
 #ifdef _OPENMP
-  if (nthreads > 1) {
-    u64* counts = (u64*)calloc((size_t)nthreads, sizeof(u64));
-    i64 s;
-    #pragma omp parallel for schedule(dynamic, 1) num_threads((int)nthreads)
-    for (s = 0; s < (i64)nthreads; s++) {
-      u64 lo = (u64)s * slicesz * span;
-      u64 hi = ((u64)s + 1) * slicesz * span;
-      if (lo > n) continue;
-      if (hi > n) hi = n;
-      u64 cap = (hi >= n) ? n : hi + 1;
-      u64 segStart = (lo == 0) ? 0 : lo - span;
-      counts[s] = sieve_slice(segStart, lo, cap, B, smallMax, medMax, pl, npl);
-    }
-    for (i64 sl = 0; sl < (i64)nthreads; sl++) pi += counts[sl];
-    free(counts);
-  } else
+    if (nthreads > 1) {
+      u64* counts = (u64*)calloc((size_t)nthreads, sizeof(u64));
+      i64 s;
+      #pragma omp parallel for schedule(dynamic, 1) num_threads((int)nthreads)
+      for (s = 0; s < (i64)nthreads; s++) {
+        u64 lo = (u64)s * slicesz * span;
+        u64 hi = ((u64)s + 1) * slicesz * span;
+        if (lo > n) continue;
+        if (hi > n) hi = n;
+        u64 cap = (hi >= n) ? n + 1 : hi + 1;
+        u64 segStart = (lo == 0) ? 0 : lo - span;
+        counts[s] = sieve_slice(segStart, lo, cap, B, smallMax, medMax, pl, npl, 0, 0);
+      }
+      for (i64 sl = 0; sl < (i64)nthreads; sl++) pi += counts[sl];
+      free(counts);
+    } else
 #endif
-  {
-    pi = sieve_slice(0, 0, n, B, smallMax, medMax, pl, npl);
+    {
+      pi = sieve_slice(0, 0, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
+    }
+    if (n >= 5) pi += 3;
+    else if (n >= 3) pi += 2;
+    else if (n >= 2) pi += 1;
   }
-  if (n >= 5) pi += 3;
-  else if (n >= 3) pi += 2;
-  else if (n >= 2) pi += 1;
-  }
-
   free(pl);
-  double sec = now_sec() - t0;
-  printf("pi(%llu) = %llu\n", (unsigned long long)n, (unsigned long long)pi);
-  printf("Seconds: %.3f\n", sec);
+  if (gsec_out) *gsec_out = gsec;
+  return pi;
+}
+
+int64_t fastsieve_pi(uint64_t n, const fastsieve_config* cfg) {
+  if (n < 2) return 0;
+  if (n > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  ensure_tables();
+  long nthreads; int useGpu; u64 B; double medF;
+  fs_resolve_cfg(&nthreads, &useGpu, &B, &medF, cfg);
+  return (int64_t)fs_pi_core(n, nthreads, useGpu, B, medF, 0);
+}
+
+typedef struct gen_ctx {
+  fastsieve_prime_cb cb;
+  void* user;
+  int64_t n;
+} gen_ctx;
+
+static int gen_emit(u64 prime, void* p) {
+  gen_ctx* g = (gen_ctx*)p;
+  if (g->cb && g->cb(prime, g->user)) return 1;
+  g->n++;
   return 0;
+}
+
+int64_t fastsieve_generate(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb, void* user,
+                           const fastsieve_config* cfg) {
+  if (lo < 2) lo = 2;
+  if (hi < lo) return 0;
+  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  ensure_tables();
+  long nthreads; int useGpu; u64 B; double medF;
+  fs_resolve_cfg(&nthreads, &useGpu, &B, &medF, cfg);
+  (void)nthreads; (void)useGpu;   /* generator is a deterministic CPU scan */
+  u64 smallMax = (u64)(L1_BYTES * 0.2);
+  u64 medMax = (u64)((double)B * medF);
+  u64 top = hi + 1;
+  u64 root = 1;
+  while ((root + 1) <= top / (root + 1)) root++;
+  u64* pl = NULL; u64 npl = 0;
+  simple_sieve(root, &pl, &npl);
+  gen_ctx g; g.cb = cb; g.user = user; g.n = 0;
+  u64 segStart = (lo > (u64)30 * B) ? lo - (u64)30 * B : 0;
+  sieve_slice(segStart, lo, top, B, smallMax, medMax, pl, npl, gen_emit, &g);
+  free(pl);
+  return g.n;
+}
+
+int64_t fastsieve_count(uint64_t lo, uint64_t hi, const fastsieve_config* cfg) {
+  if (lo < 2) lo = 2;
+  if (hi < lo) return 0;
+  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  if (lo == 2) return fastsieve_pi(hi, cfg);
+  return fastsieve_generate(lo, hi, NULL, 0, cfg);
+}
+
+int fastsieve_isprime(uint64_t n, const fastsieve_config* cfg) {
+  if (n < 2) return 0;
+  if (n > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  return fastsieve_count(n, n, cfg) == 1;
+}
+
+int64_t fastsieve_nth_prime(uint64_t k, uint64_t start, const fastsieve_config* cfg) {
+  if (k == 0) return FASTSIEVE_ERR_ARGS;
+  if (start < 2) start = 2;
+  u64 countBefore = (start <= 2) ? 0 : (u64)fastsieve_pi(start - 1, cfg);
+  if (countBefore >= (u64)UINT64_MAX - k) return FASTSIEVE_ERR_RANGE;
+  u64 j = countBefore + k;                 /* overall 1-based prime index */
+  double lj = log((double)j);
+  double l2 = log(lj < 1.0 ? 1.0 : lj);
+  u64 hi = (j >= 6) ? (u64)((double)j * (lj + l2)) + 64 : 12;   /* P_j bound */
+  if (hi < start) hi = start;
+  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  int guard = 0;
+  while ((u64)fastsieve_pi(hi, cfg) < j && hi < FASTSIEVE_MAX_N && guard++ < 80)
+    hi += hi >> 1;
+  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  u64 lo = start;
+  while (lo < hi) {                        /* smallest x >= start, pi(x) >= j */
+    u64 m = lo + (hi - lo) / 2;
+    if ((u64)fastsieve_pi(m, cfg) >= j) hi = m; else lo = m + 1;
+  }
+  return (int64_t)lo;
 }
 
 
