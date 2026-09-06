@@ -1,0 +1,9 @@
+build/
+*.obj
+*.pdb
+*.ilk
+*.exe
+third_party/
+__pycache__/
+.venv/
+*.log
