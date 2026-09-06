@@ -2,7 +2,7 @@
 
 A fast, correct, open-source **segmented sieve of Eratosthenes** that counts the
 prime numbers up to `n` on the CPU (single & multi-threaded) and, optionally, on
-an OpenCL GPU accelerator.
+an OpenCL or CUDA GPU accelerator.
 
 It is a from-scratch implementation of the architecture made famous by
 kimwalisch/primesieve: a bit-packed **wheel-30** layout (8 candidate flags per
@@ -113,6 +113,23 @@ crossing of large primes, RTX 3090) is **faster than 12-thread primesieve from
 ~1e10 upward** — 1e12 in 17.9 s vs 163 s, 47× faster than the initial port.
 Design, measurements and the rejected-alternatives log are in
 [docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md).
+
+### GPUs compared (kernel-only time)
+
+| n     | CPU 12 threads (dev box) | AMD GPU OpenCL (RX 9070 XT) | CPU 12 threads (venus) | CUDA GPU (RTX 3090) |
+|-------|-------------------------:|----------------------------:|-----------------------:|--------------------:|
+| 1e8   | 0.038 s                  | 0.007 s                     | –                      | –                  |
+| 1e9   | 0.056 s                  | 0.066 s                     | 0.07 s                 | 0.016 s            |
+| 1e10  | 0.38 s                   | 1.30 s                      | 0.50 s                 | 0.16 s             |
+| 1e11  | 3.76 s                   | 26.1 s                      | –                      | 1.6 s              |
+| 1e12  | 52 s                     | –                           | 257 s                  | 17.9 s             |
+
+Takeaways: on the **CUDA side the GPU wins everywhere** (1e12: **17.9 s** vs
+163 s for 12-thread primesieve / 257 s for our CPU). The **OpenCL kernel on the
+RX 9070 XT is exact** (audit passes, no fallback) but only beats the CPU below
+≈5×10⁸ (crossover); the v3 optimizations have not yet been ported to the OpenCL
+path — that is the next work item (see [docs/GPU.md](docs/GPU.md) and
+[docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md)).
 
 ## License
 
