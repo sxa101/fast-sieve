@@ -118,18 +118,21 @@ Design, measurements and the rejected-alternatives log are in
 
 | n     | CPU 12 threads (dev box) | AMD GPU OpenCL (RX 9070 XT) | CPU 12 threads (venus) | CUDA GPU (RTX 3090) |
 |-------|-------------------------:|----------------------------:|-----------------------:|--------------------:|
-| 1e8   | 0.038 s                  | 0.007 s                     | –                      | –                  |
-| 1e9   | 0.056 s                  | 0.066 s                     | 0.07 s                 | 0.016 s            |
-| 1e10  | 0.38 s                   | 1.30 s                      | 0.50 s                 | 0.16 s             |
-| 1e11  | 3.76 s                   | 26.1 s                      | –                      | 1.6 s              |
-| 1e12  | 52 s                     | –                           | 257 s                  | 17.9 s             |
+| 1e8   | 0.032 s                  | 0.007 s                     | –                      | –                  |
+| 1e9   | 0.052 s                  | 0.063 s                     | 0.07 s                 | 0.016 s            |
+| 1e10  | 0.35 s                   | 1.11 s                      | 0.50 s                 | 0.16 s             |
+| 1e11  | 4.1 s                    | 26.2 s                      | –                      | 1.6 s              |
+| 1e12  | 50.6 s                   | 715.5 s                     | 257 s                  | 17.9 s             |
 
-Takeaways: on the **CUDA side the GPU wins everywhere** (1e12: **17.9 s** vs
-163 s for 12-thread primesieve / 257 s for our CPU). The **OpenCL kernel on the
-RX 9070 XT is exact** (audit passes, no fallback) but only beats the CPU below
-≈5×10⁸ (crossover); the v3 optimizations have not yet been ported to the OpenCL
-path — that is the next work item (see [docs/GPU.md](docs/GPU.md) and
-[docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md)).
+Takeaways:
+* **CUDA (v3 kernel) wins everywhere**: 1e12 in **17.9 s** vs 163 s for
+  12-thread primesieve and 257 s for our CPU.
+* **The OpenCL path on this RX 9070 XT is exact** (audit passes, no fallback —
+  confirmed up to 1e12), but still runs the v1 kernel: it beats the CPU only
+  below ≈5×10⁸ and extrapolates to a **715 s kernel at 1e12** (≈50 s CPU-12t).
+  Porting the v3 phase-split kernel to OpenCL is the next work item
+  (see [docs/GPU.md](docs/GPU.md) and
+  [docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md)).
 
 ## License
 
