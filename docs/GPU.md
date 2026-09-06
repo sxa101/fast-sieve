@@ -63,20 +63,26 @@ Full design and rejected alternatives in
 
 ### OpenCL (RX 9070 XT, kernel-only time - dev box, re-measured 2026-09-07)
 
-Still the v1-style kernel (no v3 optimizations yet): exact (audit passes, no
-fallback - verified up to 1e12), but only beats the CPU below the crossover
-~ 5e8.
+Now the **v3 phase-split kernel** (reciprocal-multiply division, small primes
+cooperative / large one-per-lane): exact (audit passes, no fallback - verified
+up to 1e12) and **faster than the CPU engine at every measured size**.
 
 | n     | CPU 12 threads | primesieve 12t | GPU kernel (OpenCL, gfx1201) |
 |-------|---------------:|---------------:|-----------------------------:|
-| 1e8   | 0.032 s        | 0.026 s        | 0.007 s                      |
-| 1e9   | 0.052 s        | 0.032 s        | 0.063 s                      |
-| 1e10  | 0.35 s         | 0.234 s        | 1.11 s                       |
-| 1e11  | 4.1 s          | 2.5 s          | 26.2 s                       |
-| 1e12  | 50.6 s         | 30.6 s         | 715.5 s                      |
+| 1e8   | 0.032 s        | 0.026 s        | 0.006 s                      |
+| 1e9   | 0.052 s        | 0.032 s        | 0.044 s                      |
+| 1e10  | 0.35 s         | 0.234 s        | 0.35 s                       |
+| 1e11  | 4.1 s          | 2.5 s          | 2.53 s                       |
+| 1e12  | 50.6 s         | 30.6 s         | 26.3 s                       |
 
-Open work item: port the v3 phase-split optimizations (reciprocal-multiply,
-phase-split prime classes, pre-sieve) to `gpu.c`/OpenCL and re-benchmark.
+The 1e12 kernel went **715.5 s -> 26.3 s** when the v1 kernel was replaced by
+the v3 phase split (≈27x); CUDA on the 3090 is still 1.5x faster (17.9 s).
+For reference, v1 (naive) timings were: 1e9 0.063, 1e10 1.11, 1e11 26.2 s.
+
+Future exercise (Linux-only): a **ROCm/HIP** backend that recompiles the CUDA
+kernel `gpu_cuda.cu` nearly verbatim (it is already exact and tuned); not
+buildable here because the RX 9070 XT is only reachable from Windows, where
+ROCm is not available.
 
 ## venus/CUDA build
 

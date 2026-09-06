@@ -100,7 +100,37 @@ static const char* gpu_kernel_program =
 "inline int pop2(ulong v){ v=v-((v>>1)&0x5555555555555555UL);"
 " v=(v&0x3333333333333333UL)+((v>>2)&0x3333333333333333UL);"
 " return (int)((((v+(v>>4))&0x0F0F0F0F0F0F0F0FUL)*0x0101010101010101UL)>>56); }\n"
-"kernel void gsieve(global const uint* prim, uint np, ulong top, global ulong* counters)\n"
+"/* umulhi: high 64 bits of the 128-bit product a*b (portable, no mul_hi builtin) */\n"
+"inline ulong umulhi(ulong a, ulong b){\n"
+"  ulong ah = a>>32, al = a & 0xFFFFFFFFUL;\n"
+"  ulong bh = b>>32, bl = b & 0xFFFFFFFFUL;\n"
+"  ulong p00 = al*bl, p01 = al*bh, p10 = ah*bl, p11 = ah*bh;\n"
+"  ulong mid = (p00>>32) + (p01 & 0xFFFFFFFFUL) + (p10 & 0xFFFFFFFFUL);\n"
+"  return p11 + (p01>>32) + (p10>>32) + (mid>>32);\n"
+"}\n"
+"/* division-free a/p with m = floor(2^64/p) precomputed; one conditional fixup */\n"
+"inline ulong divf_m(ulong a, uint p, ulong m){\n"
+"  ulong q = umulhi(a, m);\n"
+"  if (a - q*(ulong)p >= (ulong)p) q++;\n"
+"  return q;\n"
+"}\n"
+"inline void clear_mult(local uchar* seg, ulong v, ulong segLow){\n"
+"  if (v >= segLow + 7 && v < segLow + (ulong)30*SEG_BYTES + 2){\n"
+"    uchar r = (uchar)(v % 30);\n"
+"    if (isunit(r)){\n"
+"      ulong idx = (v - segLow) / 30;\n"
+"      if (r == 1) idx -= 1;    /* residue 1 lives at offset 31 = one byte earlier */\n"
+"      if (idx < SEG_BYTES){\n"
+"        uint wi = (uint)idx >> 2;\n"
+"        uint by = (uint)idx & 3;\n"
+"        uint wordMask = ~(((uint)1u << bitidx(r)) << (8*by));\n"
+"        atomic_and(&((__local uint*)seg)[wi], wordMask);\n"
+"      }\n"
+"    }\n"
+"  }\n"
+"}\n"
+"kernel void gsieve(global const uint* prim, global const ulong* pm, uint np, uint p1idx,"
+" ulong top, global ulong* counters)\n"
 "{\n"
 "  uint gid = get_group_id(0);\n"
 "  uint lid = get_local_id(0);\n"
@@ -110,30 +140,34 @@ static const char* gpu_kernel_program =
 "  local uchar seg[SEG_BYTES];\n"
 "  for (uint i = lid; i < SEG_BYTES; i += L) seg[i] = 0xFF;\n"
 "  barrier(CLK_LOCAL_MEM_FENCE);\n"
-"  for (uint pi = 0; pi < np; pi++){\n"
+"  /* lo = number of active sieving primes, prim[0..lo) have p*p <= segEnd+1 */\n"
+"  uint lo = 0, hi = np;\n"
+"  while (lo < hi){\n"
+"    uint mid = (lo + hi) >> 1;\n"
+"    if ((ulong)prim[mid] * prim[mid] <= segEnd + 1) lo = mid + 1;\n"
+"    else hi = mid;\n"
+"  }\n"
+"  /* phase 1: small primes (p < 1920), cooperative 256-lane q-loop */\n"
+"  uint lim1 = (p1idx < lo) ? p1idx : lo;\n"
+"  for (uint pi = 0; pi < lim1; pi++){\n"
 "    uint p = prim[pi];\n"
 "    if (p < 7) continue;\n"
 "    ulong pp = (ulong)p * p;\n"
-"    if (pp > segEnd + 1) break;\n"
-"    ulong v0 = (pp > segLow + 7) ? pp : segLow + 7;\n"
-"    ulong q0 = (v0 + p - 1) / p;\n"
-"    ulong qmax = (segEnd + 1) / p;\n"
-"    for (ulong q = q0 + lid; q <= qmax; q += L){\n"
-"      ulong v = p * q;\n"
-"      if (v >= segLow + 7 && v < segEnd + 2){\n"
-"        uchar r = (uchar)(v % 30);\n"
-"        if (isunit(r)){\n"
-"          ulong idx = (v - segLow) / 30;\n"
-"          if (r == 1) idx -= 1;    /* residue 1 lives at offset 31 = one byte earlier */\n"
-"          if (idx < SEG_BYTES){\n"
-"            uint wi = (uint)idx >> 2;\n"
-"            uint by = (uint)idx & 3;\n"
-"            uint wordMask = ~(((uint)1u << bitidx(r)) << (8*by));\n"
-"            atomic_and(&((__local uint*)seg)[wi], wordMask);\n"
-"          }\n"
-"        }\n"
-"      }\n"
-"    }\n"
+"    ulong m  = pm[pi];\n"
+"    ulong q0 = (pp >= segLow + 7) ? (ulong)p : divf_m(segLow + 6 + p, p, m);\n"
+"    ulong qmax = divf_m(segEnd + 1, p, m);\n"
+"    for (ulong q = q0 + lid; q <= qmax; q += L)\n"
+"      clear_mult(seg, p*q, segLow);\n"
+"  }\n"
+"  /* phase 2: large primes (>= 1920 up to sqrt(segEnd+1)), one prime per lane */\n"
+"  for (uint pi = p1idx + lid; pi < lo; pi += L){\n"
+"    uint p = prim[pi];\n"
+"    ulong pp = (ulong)p * p;\n"
+"    ulong m  = pm[pi];\n"
+"    ulong q0 = (pp >= segLow + 7) ? (ulong)p : divf_m(segLow + 6 + p, p, m);\n"
+"    ulong qmax = divf_m(segEnd + 1, p, m);\n"
+"    for (ulong q = q0; q <= qmax; q++)\n"
+"      clear_mult(seg, p*q, segLow);\n"
 "  }\n"
 "  barrier(CLK_LOCAL_MEM_FENCE);\n"
 "  ulong cap = (segEnd < top) ? (segEnd + 2) : top;\n"
@@ -179,12 +213,14 @@ GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out){
   u64 root = 1; while ((root+1) <= top/(root+1)) root++;
   u64 np_ = 0; u64* pl = simple_primes(root, &np_);
   u32* prime32 = (u32*)malloc(sizeof(u32)*(size_t)(np_ ? np_ : 1));
-  for (u64 i = 0; i < np_; i++) prime32[i] = (u32)pl[i];
+  u64* mag = (u64*)malloc(sizeof(u64)*(size_t)(np_ ? np_ : 1));
+  u32 p1idx = 0;
+  for (u64 i = 0; i < np_; i++){ prime32[i] = (u32)pl[i]; mag[i] = ~0ULL / pl[i]; if (pl[i] < 1920) p1idx = (u32)i + 1; }
   free(pl);
 
   cl_int err;
   cl_context ctx = CreateContext(0, 1, &dev, 0, 0, &err);
-  if (!ctx){ free(prime32); return res; }
+  if (!ctx){ free(prime32); free(mag); return res; }
   cl_command_queue q = CreateCommandQueueWithProperties
       ? CreateCommandQueueWithProperties(ctx, dev, 0, &err)
       : CreateCommandQueue(ctx, dev, 0, &err);
@@ -192,16 +228,20 @@ GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out){
   size_t srclen = strlen(gpu_kernel_program);
   cl_program prog = CreateProgramWithSource(ctx, 1, src, &srclen, &err);
   err = BuildProgram(prog, 1, &dev, "-cl-std=CL1.2", 0, 0);
-  if (err != 0){ ReleaseContext(ctx); free(prime32); return res; }
+  if (err != 0){ ReleaseContext(ctx); free(prime32); free(mag); return res; }
   cl_kernel ker = CreateKernel(prog, "gsieve", &err);
   u64 nblocks = (top + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
   cl_mem bufP = CreateBuffer(ctx, 0x1, np_*4, 0, &err);
+  cl_mem bufM = CreateBuffer(ctx, 0x1, np_*8, 0, &err);
   cl_mem bufC = CreateBuffer(ctx, 0x2, nblocks*8, 0, &err);
-  if (!bufP || !bufC){ ReleaseKernel(ker); ReleaseCommandQueue(q); ReleaseContext(ctx); free(prime32); return res; }
+  if (!bufP || !bufM || !bufC){ ReleaseKernel(ker); ReleaseCommandQueue(q); ReleaseContext(ctx); free(prime32); free(mag); return res; }
   EnqueueWriteBuffer(q, bufP, 1, 0, np_*4, prime32, 0, 0, 0);
+  EnqueueWriteBuffer(q, bufM, 1, 0, np_*8, mag, 0, 0, 0);
   cl_uint iarg = 0;
   SetKernelArg(ker, iarg++, sizeof(bufP), &bufP);
+  SetKernelArg(ker, iarg++, sizeof(bufM), &bufM);
   SetKernelArg(ker, iarg++, sizeof(cl_uint), &np_);
+  SetKernelArg(ker, iarg++, sizeof(cl_uint), &p1idx);
   SetKernelArg(ker, iarg++, sizeof(cl_ulong), &top);
   SetKernelArg(ker, iarg++, sizeof(bufC), &bufC);
   size_t gsz = nblocks * 256, lsz = 256;
@@ -210,8 +250,8 @@ GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out){
   Finish(q);
   double t1 = now();
   if (err != 0 || !block_counts){
-    ReleaseMemObject(bufP); ReleaseMemObject(bufC); ReleaseKernel(ker);
-    ReleaseCommandQueue(q); ReleaseContext(ctx); free(prime32);
+    ReleaseMemObject(bufP); ReleaseMemObject(bufM); ReleaseMemObject(bufC); ReleaseKernel(ker);
+    ReleaseCommandQueue(q); ReleaseContext(ctx); free(prime32); free(mag);
     return res;
   }
   EnqueueReadBuffer(q, bufC, 1, 0, nblocks*8, block_counts, 0, 0, 0);
@@ -220,9 +260,9 @@ GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out){
   res.ok = 1;
   res.nblocks = nblocks;
   res.gpu_secs = t1 - t0;
-  ReleaseMemObject(bufP); ReleaseMemObject(bufC); ReleaseKernel(ker);
+  ReleaseMemObject(bufP); ReleaseMemObject(bufM); ReleaseMemObject(bufC); ReleaseKernel(ker);
   ReleaseCommandQueue(q); ReleaseContext(ctx);
-  free(prime32);
+  free(prime32); free(mag);
   return res;
 }
 
