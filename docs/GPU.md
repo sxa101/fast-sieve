@@ -40,7 +40,7 @@ RTX 3090 / 3080 Ti (CUDA); 24/24 sweep on both paths.
 
 ## Performance
 
-### CUDA (RTX 3090, kernel-only time - venus)
+### CUDA (RTX 3090, kernel-only time - Linux reference host)
 
 The v3 **phase-split kernel** replaces the naive per-block prime scan:
 division-free `q0`/`qmax` (reciprocal multiply + `q0 = p` shortcut), small primes
@@ -59,7 +59,7 @@ and 6 CTA/SM occupancy.
 faster than 12-thread primesieve, 14x faster than our CPU). Bit-exact: full
 audit 0 mismatches, `./tests.sh ./fastsieve --gpu` 24/24, boundary primes exact.
 Full design and rejected alternatives in
-[docs/RESUME_VENUS.md §9](RESUME_VENUS.md).
+[docs/GPU_DEVELOPMENT.md §9](GPU_DEVELOPMENT.md).
 
 ### OpenCL (RX 9070 XT, kernel-only time - dev box, re-measured 2026-09-07)
 
@@ -84,7 +84,7 @@ kernel `gpu_cuda.cu` nearly verbatim (it is already exact and tuned); not
 buildable here because the RX 9070 XT is only reachable from Windows, where
 ROCm is not available.
 
-## venus/CUDA build
+## Linux/CUDA build
 
 ```
 nvcc -O3 -arch=sm_86 -Xcompiler "-fopenmp -march=native -O3" \

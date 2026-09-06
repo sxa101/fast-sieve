@@ -16,12 +16,16 @@ per-segment re-initialization), and hardware-popcount counting.
 * **CPU engine: verified exact** – single-thread and multi-thread, validated
   against primesieve across 10^2 … 10^12 including tricky frame/boundary
   primes (e.g. `786431²` and `786433²`).
-* **GPU engine (OpenCL): accelerator with correctness by construction** – the
-  GPU result is audited against the exact CPU engine on sampled segments; on
-  any mismatch the tool silently/visibly falls back to the CPU engine. The
-  published result is therefore *always* exact, on any machine. On drivers where
-  the GPU kernel is bit-exact (expected on CUDA/venus), the audit passes and full
-  GPU speed is used. See [docs/GPU.md](docs/GPU.md).
+* **GPU engine (OpenCL & CUDA): accelerator with correctness by construction**
+  – the GPU result is audited against the exact CPU engine on sampled segments;
+  on any mismatch the tool falls back to the CPU engine. The published result is
+  therefore *always* exact, on any machine. Both backends are **bit-exact** —
+  the CUDA kernel on RTX 3090 / 3080 Ti and the OpenCL kernel on RX 9070 XT,
+  audit passes with no fallback. See [docs/GPU.md](docs/GPU.md).
+* **C API** (`fastsieve.h`): `fastsieve_pi`, `fastsieve_count`,
+  `fastsieve_isprime`, `fastsieve_nth_prime`, `fastsieve_generate`, all exact
+  (same audited engine). Verified 62/62 on the CUDA build (RTX 3090) and the
+  OpenCL build (RX 9070 XT). See [docs/API.md](docs/API.md).
 * A **mod-210 wheel** experiment (skipping multiples of 7, −14% crossings) was
   carried through table generation and verification, then **reverted** after a
   rare one-frame carry misalignment surfaced in multi-segment runs. Full notes
@@ -110,7 +114,8 @@ We are consistently ~1.5–1.7× behind primesieve: its compile-time-unrolled
 Duff's-device residue loops with immediate bit masks cannot be emitted by MSVC
 from our runtime-generated tables. That is the single declared gap.
 
-**venus** (Intel i5-11600, 12 threads, gcc 13 -O3 -march=native; CUDA, RTX 3090):
+**NVIDIA reference box** (Intel i5-11600, 12 threads, gcc 13 -O3 -march=native;
+CUDA, RTX 3090):
 
 | n     | ours CPU 1t | ours CPU 12t | primesieve 1t | primesieve 12t | ours GPU (kernel) |
 |-------|------------:|-------------:|--------------:|---------------:|------------------:|
@@ -125,17 +130,17 @@ fallback). The v3 phase-split kernel (division-free + one-prime-per-lane
 crossing of large primes, RTX 3090) is **faster than 12-thread primesieve from
 ~1e10 upward** — 1e12 in 17.9 s vs 163 s, 47× faster than the initial port.
 Design, measurements and the rejected-alternatives log are in
-[docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md).
+[docs/GPU_DEVELOPMENT.md §9](docs/GPU_DEVELOPMENT.md).
 
 ### GPUs compared (kernel-only time)
 
-| n     | CPU 12 threads (dev box) | AMD GPU OpenCL (RX 9070 XT) | CPU 12 threads (venus) | CUDA GPU (RTX 3090) |
-|-------|-------------------------:|----------------------------:|-----------------------:|--------------------:|
-| 1e8   | 0.032 s                  | 0.006 s                     | –                      | –                  |
-| 1e9   | 0.052 s                  | 0.044 s                     | 0.07 s                 | 0.016 s            |
-| 1e10  | 0.35 s                   | 0.35 s                      | 0.50 s                 | 0.16 s             |
-| 1e11  | 4.1 s                    | 2.53 s                      | –                      | 1.6 s              |
-| 1e12  | 50.6 s                   | 26.3 s                      | 257 s                  | 17.9 s             |
+| n     | CPU 12 threads (dev box) | AMD GPU OpenCL (RX 9070 XT) | CPU 12 threads (reference) | CUDA GPU (RTX 3090) |
+|-------|-------------------------:|----------------------------:|---------------------------:|--------------------:|
+| 1e8   | 0.032 s                  | 0.006 s                     | –                          | –                  |
+| 1e9   | 0.052 s                  | 0.044 s                     | 0.07 s                     | 0.016 s            |
+| 1e10  | 0.35 s                   | 0.35 s                      | 0.50 s                     | 0.16 s             |
+| 1e11  | 4.1 s                    | 2.53 s                      | –                          | 1.6 s              |
+| 1e12  | 50.6 s                   | 26.3 s                      | 257 s                      | 17.9 s             |
 
 Takeaways:
 * **CUDA (v3 kernel) is still the fastest**: 1e12 in **17.9 s** (vs 30.6 s for
@@ -145,7 +150,7 @@ Takeaways:
   (reciprocal-multiply division, small-prime cooperative loop, large primes one
   per lane): **exact** (audit passes, no fallback, verified up to 1e12) and
   beats the CPU engine at every measured size — 1e12 kernel **715.5 s → 26.3 s**
-  (≈27×). Design in [docs/RESUME_VENUS.md §9](docs/RESUME_VENUS.md),
+  (≈27×). Design in [docs/GPU_DEVELOPMENT.md §9](docs/GPU_DEVELOPMENT.md),
   measurements in [docs/GPU.md](docs/GPU.md).
 * A ROCm/HIP backend (recompiling the CUDA kernel `gpu_cuda.cu` ~verbatim) is a
   future exercise once the AMD card is reachable from Linux; not available on the
@@ -157,6 +162,8 @@ BSD 2-Clause. See [LICENSE](LICENSE).
 
 ## Roadmap
 
-* Port the GPU engine to CUDA on the venus box (RTX 3090 / RTX 3080) and
-  re-run the audit – see [docs/RESUME_VENUS.md](docs/RESUME_VENUS.md).
+* **GPU backends — mostly done.** OpenCL (RX 9070 XT) and CUDA (RTX 3090 /
+  RTX 3080 Ti) both run the v3 phase-split kernel bit-exact via the audited
+  path. Open items: a ROCm/HIP backend (Linux, once the AMD card is reachable
+  there), and closing the residual CPU gap to primesieve (see Performance).
 * Re-land the wheel-210 crossing with the frame-carry semantics fixed.

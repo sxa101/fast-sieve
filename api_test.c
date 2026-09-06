@@ -1,5 +1,8 @@
-/* api_test.c - verification of the fastsieve C API on the CUDA build.
- * Every check is against hard-coded primesieve-derived oracle values. */
+/* api_test.c - verification of the fastsieve C API on CPU + any GPU backend.
+ * Every check is against hard-coded primesieve-derived oracle values.
+ *
+ * Note: do NOT call setvbuf(_IOLBF) here - the MSVC VCRT fail-fasts (0xC0000409)
+ * on it when stdout is redirected. Console tools can live without it. */
 #include <stdio.h>
 #include <stdlib.h>
 #include "fastsieve.h"
@@ -21,7 +24,6 @@ static int gen_collect(uint64_t p, void* ud) {
 }
 
 int main(void) {
-  setvbuf(stdout, NULL, _IOLBF, 0);
   fastsieve_init();
   printf("version: %s\n\n", fastsieve_version());
 

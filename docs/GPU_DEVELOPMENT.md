@@ -1,8 +1,8 @@
-# RESUME on `venus` – full session context dump
+# GPU development & CUDA port notes – full session context dump
 
 This file is a self-contained handoff so a fresh agent session on the CUDA
-reference host **venus** (RTX 3090 + RTX 3080) can resume `fastsieve` without
-repeating weeks of archaeology. Copy the repo to venus, read this file, then
+reference host (**RTX 3090** + **RTX 3080**) can resume `fastsieve` without
+repeating weeks of archaeology. Copy the repo to that host, read this file, then
 give the agent the "System prompt" below verbatim.
 
 ---
@@ -21,7 +21,7 @@ fastsieve.c   CPU engine (wheel-30, pre-sieve, 3 prime classes, OpenMP slices)
 gpu.c/.h      OpenCL GPU accelerator + audit hooks
 gpusieve.c    standalone OpenCL demo/diagnostic (dev only)
 tests.ps1     system suite (oracle of exact π(n))
-build.bat/tests.bat, README.md, LICENSE, docs/{DESIGN,GPU,WHEEL210,RESUME_VENUS}.md
+build.bat/tests.bat, README.md, LICENSE, docs/{DESIGN,GPU,GPU_DEVELOPMENT,WHEEL210}.md
 ```
 
 ## 2. Environment facts
@@ -30,7 +30,7 @@ build.bat/tests.bat, README.md, LICENSE, docs/{DESIGN,GPU,WHEEL210,RESUME_VENUS}
   (12 threads, Zen3, AVX2, L1D 32K, L2 512K, L3 16MB) + **AMD Radeon RX 9070 XT**
   (`gfx1201`, RDNA4) via **OpenCL** only (no CUDA on AMD). OpenCL headers from
   `KhronosGroup/OpenCL-Headers`; kernel loads `OpenCL.dll` dynamically.
-* **venus:** Linux, **CUDA runtime**, **NVIDIA RTX 3090 and RTX 3080**.
+* **CUDA reference host:** Linux, **CUDA runtime**, **NVIDIA RTX 3090 and RTX 3080**.
   → `nvcc`, no OpenCL needed; port `gpu.c` to CUDA (see §7).
 * Reference oracle available on both: `primesieve` CLI (build from
   kimwalisch/primesieve, use `-t1`/`-t12 --no-status N` for π and `lo hi` for
@@ -68,12 +68,12 @@ build.bat/tests.bat, README.md, LICENSE, docs/{DESIGN,GPU,WHEEL210,RESUME_VENUS}
 
 ## 4. Correctness verification workflow (used throughout)
 
-1. Build with MSVC (`build.bat`) or gcc/clang on venus.
+1. Build with MSVC (`build.bat`) or gcc/clang on the reference host.
 2. Sweep: `100, 1000, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12` at
    `-t 1` and `-t 12`, compare `pi()` to primesieve.
 3. Boundary primes: `618473717761` (= 786431², π=23688293324) and
    `618476863489` (= 786433², π=23688409284).
-4. `powershell -ExecutionPolicy Bypass .\tests.ps1` (or a bash port on venus) –
+4. `powershell -ExecutionPolicy Bypass .\tests.ps1` (or a bash port on Linux) –
    oracle table lives in `tests.ps1`.
 5. When hunting a cross bug: build a naive bit-reference for one segment and
    byte-diff, then bisect to the exact differing candidate; deterministic =
@@ -104,7 +104,7 @@ GPU (OpenCL, RX 9070 XT, unreliably-exact proto): 1e8 in ≈7 ms
 (~14–16 Gcandidates/s). Reference-class GPU sieves: CUDASieve GTX1080 counted
 1e12 in 12.5 s → modern cards have several× more headroom.
 
-## 6. GPU open TODOs (status after the 2026-09-06 venus session)
+## 6. GPU open TODOs (status after the 2026-09-06 CUDA session)
 
 1. ✅ **CUDA port of `gpu.c` kernel — DONE, bit-exact.** `gpu_cuda.cu`
    (256 threads/block, `__shared__` 16 KiB segment, word-level `atomicAnd`,
@@ -127,7 +127,7 @@ GPU (OpenCL, RX 9070 XT, unreliably-exact proto): 1e8 in ≈7 ms
    that the audit kept catching. `fastsieve.c`'s audit window now uses the same
    cap convention (`segHi+2` when `segHi < n`). ✅ Dev box re-ran it
    (2026-09-06b): OpenCL bit-exact on the RX 9070 XT, no fallback.
-3. ✅ **CUDA kernel performance — DONE (venus round 2, §9).** Division-free
+3. ✅ **CUDA kernel performance — DONE (CUDA round 2, §9).** Division-free
    reciprocal multiply + `q0 = p` shortcut + v3 phase-split crossing
    (small primes cooperative / large primes one-per-lane). 1e12: 836 s →
    **17.9 s** on the 3090 (18.2 s on the 3080 Ti) — beats 12-thread primesieve
@@ -139,7 +139,7 @@ GPU (OpenCL, RX 9070 XT, unreliably-exact proto): 1e8 in ≈7 ms
 5. ⬜ **Re-land wheel-210** on CPU (see `docs/WHEEL210.md` checklist) — still
    reverted, still honest.
 
-## 7. venus/CUDA quickstart (verified verbatim)
+## 7. Linux/CUDA quickstart (verified verbatim)
 
 ```
 # oracle
@@ -163,7 +163,7 @@ nvcc -O3 -arch=sm_86 -Xcompiler "-fopenmp -march=native -O3" \
 
 ---
 
-## 8. venus session report (2026-09-06)
+## 8. CUDA session report (2026-09-06)
 
 Host: Linux, i5-11600 (12t), gcc 13.3, CUDA 13.1, RTX 3080 Ti (CUDA dev 1) +
 RTX 3090 (CUDA dev 0). Oracle: primesieve 12.16 built to `~/.local`.
@@ -183,7 +183,7 @@ RTX 3090 (CUDA dev 0). Oracle: primesieve 12.16 built to `~/.local`.
 * Full verification: CPU sweep 24/24, GPU sweep 24/24 (3090), spot-checked
   exact on 3080 Ti (1e8..1e11), boundary primes exact on both paths.
 
-**venus benchmarks** (GPU columns = round-2 v3 kernel; round-1 numbers in §9.0)
+**CUDA reference-host benchmarks** (GPU columns = round-2 v3 kernel; round-1 numbers in §9.0)
 
 | n     | ours CPU 1t | ours CPU 12t | psieve 1t | psieve 12t | ours GPU 3090 | ours GPU 3080 Ti |
 |-------|------------:|-------------:|----------:|-----------:|--------------:|-----------------:|
@@ -198,7 +198,7 @@ kernel now beats 12-thread primesieve from ~1e10 upward.
 
 ---
 
-## 9. venus round 2 — CUDA kernel optimization v2 (DESIGN → IMPLEMENTED 2026-09-06c)
+## 9. CUDA round 2 — kernel optimization v2 (DESIGN → IMPLEMENTED 2026-09-06c)
 
 ### 9.0 Round-2 results (all exact, audit 0 mismatches, 24/24 gate)
 
@@ -300,11 +300,11 @@ kernel gsieve2(prim[], m[], np, K, ..., top, counters[])
 
 ---
 
-## System prompt (paste to the venus agent)
+## System prompt (paste to the next GPU agent)
 
 ```
 You are resuming the "fastsieve" project. Read (in order):
-  README.md, docs/DESIGN.md, docs/GPU.md, docs/WHEEL210.md, docs/RESUME_VENUS.md.
+  README.md, docs/DESIGN.md, docs/GPU.md, docs/WHEEL210.md, docs/GPU_DEVELOPMENT.md.
 State: CPU engine exact (gcc build, 24/24 sweep incl. boundary primes); the v3
 phase-split CUDA kernel (gpu_cuda.cu) is BIT-EXACT on RTX 3090/3080 Ti and
 FAST: 1e11 kernel 1.64 s, 1e12 kernel 17.9 s (3090) - beats 12-thread
@@ -319,10 +319,10 @@ Mission (in priority order):
     benchmark vs the wheel-30 numbers in §8.
  2) Optional: GPU pre-sieve AND-pattern init (§9.2 D) - only if a profile
     shows the kernel is init-bound; keep the audit + 24/24 gate.
- 3) Update docs/RESUME_VENUS.md + benchmark tables with new results, then
+ 3) Update docs/GPU_DEVELOPMENT.md + benchmark tables with new results, then
     commit + push.
 
 Rules: never claim exactness without the byte/oracle check in
-docs/RESUME_VENUS.md §4; keep the audit-and-fallback design and the exact
+docs/GPU_DEVELOPMENT.md §4; keep the audit-and-fallback design and the exact
 π(n) contract (printed value must always be exact).
 ```

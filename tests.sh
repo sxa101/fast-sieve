@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verification sweep per docs/RESUME_VENUS.md section 4.
+# Verification sweep per docs/GPU_DEVELOPMENT.md section 4.
 # Usage: ./tests.sh [binary] [extra args, e.g. --gpu]
 set -u
 BIN=${1:-./fastsieve}
