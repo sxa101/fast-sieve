@@ -678,6 +678,7 @@ int main(int argc, char** argv) {
     u64* pl = NULL; u64 npl = 0;
     simple_sieve(root, &pl, &npl);
     u64 segStart = (glo > (u64)30 * B) ? glo - (u64)30 * B : 0;
+    segStart -= segStart % 30;   /* wheel layout requires segLow = 0 (mod 30) */
     pi = sieve_slice(segStart, glo, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
     free(pl);
     printf("pi([%llu, %llu]) = %llu\n", (unsigned long long)glo, (unsigned long long)n,
@@ -840,16 +841,15 @@ typedef struct gen_ctx {
 
 static int gen_emit(u64 prime, void* p) {
   gen_ctx* g = (gen_ctx*)p;
+  g->n++;   /* the prime is delivered to cb either way - it counts as emitted */
   if (g->cb && g->cb(prime, g->user)) return 1;
-  g->n++;
   return 0;
 }
 
-int64_t fastsieve_generate(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb, void* user,
-                           const fastsieve_config* cfg) {
-  if (lo < 2) lo = 2;
-  if (hi < lo) return 0;
-  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+/* Shared generator core; cb == NULL just counts. fastsieve_generate adds the
+   public cb-null/error contract on top. */
+static int64_t fs_generate_core(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb,
+                                void* user, const fastsieve_config* cfg) {
   ensure_tables();
   long nthreads; int useGpu; u64 B; double medF;
   fs_resolve_cfg(&nthreads, &useGpu, &B, &medF, cfg);
@@ -863,17 +863,27 @@ int64_t fastsieve_generate(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb, void
   simple_sieve(root, &pl, &npl);
   gen_ctx g; g.cb = cb; g.user = user; g.n = 0;
   u64 segStart = (lo > (u64)30 * B) ? lo - (u64)30 * B : 0;
+  segStart -= segStart % 30;   /* wheel layout requires segLow = 0 (mod 30) */
   sieve_slice(segStart, lo, top, B, smallMax, medMax, pl, npl, gen_emit, &g);
   free(pl);
   return g.n;
 }
 
+int64_t fastsieve_generate(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb, void* user,
+                           const fastsieve_config* cfg) {
+  if (lo < 2) lo = 2;
+  if (hi < lo) return FASTSIEVE_ERR_ARGS;
+  if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
+  if (!cb) return FASTSIEVE_ERR_ARGS;   /* header contract: callback required */
+  return fs_generate_core(lo, hi, cb, user, cfg);
+}
+
 int64_t fastsieve_count(uint64_t lo, uint64_t hi, const fastsieve_config* cfg) {
   if (lo < 2) lo = 2;
-  if (hi < lo) return 0;
+  if (hi < lo) return FASTSIEVE_ERR_ARGS;   /* header contract: lo > hi is an error */
   if (hi > FASTSIEVE_MAX_N) return FASTSIEVE_ERR_RANGE;
   if (lo == 2) return fastsieve_pi(hi, cfg);
-  return fastsieve_generate(lo, hi, NULL, 0, cfg);
+  return fs_generate_core(lo, hi, NULL, 0, cfg);
 }
 
 int fastsieve_isprime(uint64_t n, const fastsieve_config* cfg) {
