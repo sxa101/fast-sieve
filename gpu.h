@@ -14,11 +14,19 @@ typedef struct {
   uint64_t  nblocks;    /* number of GPU blocks used */
 } GpuResult;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Run the OpenCL segmented sieve for [0, top).
    On failure ok = 0. On success fills block_counts[0..nblocks). */
 GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out);
 
 /* Aggregate convenience: gpu_sieve + sum. */
 GpuResult gpu_count(uint64_t top);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

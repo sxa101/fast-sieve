@@ -7,6 +7,8 @@
    racing on the same byte are race-free. */
 #include "gpu.h"
 
+#ifdef _WIN32
+
 #include <CL/cl.h>
 #include <string.h>
 #include <stdio.h>
@@ -112,13 +114,13 @@ static const char* gpu_kernel_program =
 "    uint p = prim[pi];\n"
 "    if (p < 7) continue;\n"
 "    ulong pp = (ulong)p * p;\n"
-"    if (pp >= segEnd) break;\n"
+"    if (pp > segEnd + 1) break;\n"
 "    ulong v0 = (pp > segLow + 7) ? pp : segLow + 7;\n"
 "    ulong q0 = (v0 + p - 1) / p;\n"
-"    ulong qmax = segEnd / p;\n"
+"    ulong qmax = (segEnd + 1) / p;\n"
 "    for (ulong q = q0 + lid; q <= qmax; q += L){\n"
 "      ulong v = p * q;\n"
-"      if (v >= segLow + 7 && v < segEnd){\n"
+"      if (v >= segLow + 7 && v < segEnd + 2){\n"
 "        uchar r = (uchar)(v % 30);\n"
 "        if (isunit(r)){\n"
 "          ulong idx = (v - segLow) / 30;\n"
@@ -136,11 +138,12 @@ static const char* gpu_kernel_program =
 "  barrier(CLK_LOCAL_MEM_FENCE);\n"
 "  ulong cap = (segEnd < top) ? (segEnd + 2) : top;\n"
 "  ulong rel = cap - segLow;\n"
-"  if (rel > (ulong)30 * SEG_BYTES) rel = (ulong)30 * SEG_BYTES;\n"
+"  /* rel may be 30*SEG_BYTES+2 for full blocks (trailing candidate segEnd+1);\n"
+"     do NOT clamp rel here or that candidate is dropped from the count. */\n"
 "  ulong nbits = 0;\n"
 "  if (rel > 1){\n"
 "    ulong full = rel / 30; ulong rem = rel % 30;\n"
-"    int cup[30] = {0,0,0,0,0,0,0,1,0,0,0,2,0,0,3,0,0,4,0,5,0,0,0,6,0,0,0,0,7,0};\n"
+"    int cup[30] = {0,0,1,1,1,1,1,1,2,2,2,2,3,3,4,4,4,4,5,5,6,6,6,6,7,7,7,7,7,7};\n"
 "    nbits = full*8 + (ulong)cup[rem];\n"
 "    nbits -= 1;   /* candidate '1' is not stored */\n"
 "  }\n"
@@ -236,3 +239,21 @@ GpuResult gpu_count(uint64_t top){
   free(bc);
   return r;
 }
+
+#else  /* !_WIN32: non-Windows build without OpenCL - CPU fallback only */
+
+#include <string.h>
+
+GpuResult gpu_sieve(uint64_t top, uint64_t* block_counts, double* secs_out) {
+  (void)top; (void)block_counts; (void)secs_out;
+  GpuResult res; memset(&res, 0, sizeof(res));
+  return res;
+}
+
+GpuResult gpu_count(uint64_t top) {
+  (void)top;
+  GpuResult res; memset(&res, 0, sizeof(res));
+  return res;
+}
+
+#endif

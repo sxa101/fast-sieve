@@ -29,6 +29,8 @@ per-segment re-initialization), and hardware-popcount counting.
 
 ## Build
 
+### Windows (MSVC)
+
 Requires MSVC (Visual Studio 2022 Build Tools) and, for the GPU path, an
 OpenCL ICD (AMD/NVIDIA driver) and the Khronos OpenCL headers.
 
@@ -36,6 +38,22 @@ OpenCL ICD (AMD/NVIDIA driver) and the Khronos OpenCL headers.
 build.bat          # CPU engine (fastsieve.exe, with OpenMP + OpenCL)
 tests.bat          # run the system test suite (tests.ps1)
 ```
+
+### Linux
+
+```
+# CPU engine (falls back to CPU when no GPU backend is compiled in)
+gcc -O3 -march=native -fopenmp fastsieve.c gpu.c -o fastsieve_cpu
+
+# CUDA engine (NVIDIA; verified bit-exact on RTX 3090 / 3080 Ti, sm_86)
+nvcc -O3 -arch=sm_86 -Xcompiler "-fopenmp -march=native -O3" \
+     fastsieve.c gpu_cuda.cu -o fastsieve
+
+./tests.sh ./fastsieve_cpu        # CPU sweep vs primesieve (24 checks)
+./tests.sh ./fastsieve --gpu      # GPU sweep vs primesieve (24 checks)
+```
+
+`tests.sh` needs the `primesieve` CLI on PATH (or `PRIMESIEVE=/path`).
 
 ## Usage
 
@@ -65,7 +83,9 @@ hard-coded oracle of exact `π(n)` values (including the two famous
 powershell -ExecutionPolicy Bypass .\tests.ps1
 ```
 
-## Performance (CPU engine, AMD Ryzen 5 5600G, MSVC /O2 /arch:AVX2)
+## Performance
+
+CPU engine, AMD Ryzen 5 5600G, MSVC /O2 /arch:AVX2:
 
 | n     | ours 1 core | ours 12 threads | primesieve 1 core | primesieve 12 threads |
 |-------|------------:|----------------:|------------------:|----------------------:|
@@ -76,6 +96,18 @@ powershell -ExecutionPolicy Bypass .\tests.ps1
 We are consistently ~1.5–1.7× behind primesieve: its compile-time-unrolled
 Duff's-device residue loops with immediate bit masks cannot be emitted by MSVC
 from our runtime-generated tables. That is the single declared gap.
+
+**venus** (Intel i5-11600, 12 threads, gcc 13 -O3 -march=native; CUDA, RTX 3090):
+
+| n     | ours CPU 1t | ours CPU 12t | primesieve 1t | primesieve 12t | ours GPU (kernel) |
+|-------|------------:|-------------:|--------------:|---------------:|------------------:|
+| 1e9   | 0.21 s      | 0.07 s       | 0.10 s        | 0.02 s         | 0.027 s           |
+| 1e10  | 2.4 s       | 0.50 s       | 1.2 s         | 0.29 s         | 0.93 s            |
+| 1e12  | 510 s       | 257 s        | 267 s         | 163 s          | 836 s             |
+
+The CUDA kernel is **bit-exact** (audit passes everywhere), but the straight
+port is division-bound (two 64-bit divisions per sieving prime per block) and
+not yet competitive at large n — kernel optimization is the next work item.
 
 ## License
 

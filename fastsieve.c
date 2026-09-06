@@ -58,8 +58,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <intrin.h>
 #include <windows.h>
+#else
+#include <immintrin.h>
+#include <time.h>
+#endif
 #include "gpu.h"
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -392,7 +397,11 @@ static void simple_sieve(u64 limit, u64** primesOut, u64* nprimesOut)
 /* ------------------------------------------------------------------ */
 /* Counting                                                            */
 /* ------------------------------------------------------------------ */
+#ifdef _WIN32
 static inline u64 popcnt(u64 x) { return (u64)__popcnt64(x); }
+#else
+static inline u64 popcnt(u64 x) { return (u64)__builtin_popcountll(x); }
+#endif
 
 static u8 CUNIT[30];
 
@@ -573,6 +582,21 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
 /* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
+#ifdef _WIN32
+static double now_sec(void) {
+  LARGE_INTEGER f, c;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&c);
+  return (double)c.QuadPart / (double)f.QuadPart;
+}
+#else
+static double now_sec(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
+#endif
+
 int main(int argc, char** argv) {
   build_cross_tables();
   build_pre_sieve_tables();
@@ -611,9 +635,7 @@ int main(int argc, char** argv) {
   u64* pl = NULL; u64 npl = 0;
   simple_sieve(root, &pl, &npl);
 
-  LARGE_INTEGER freq, t0, t1;
-  QueryPerformanceFrequency(&freq);
-  QueryPerformanceCounter(&t0);
+  double t0 = now_sec();
 
   u64 castpi = 0;
   if (glo > 0) {
@@ -630,8 +652,6 @@ int main(int argc, char** argv) {
   double gsec = 0;
   int gpuFellBack = 0;
   if (useGpu) {
-    GpuResult gr = gpu_sieve(n, NULL, NULL); /* probe? no - do full below */
-    (void)gr;
     u64 gb = (n + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
     u64* bc = (u64*)calloc((size_t)gb, 8);
     GpuResult r = gpu_sieve(n, bc, &gsec);
@@ -639,12 +659,11 @@ int main(int argc, char** argv) {
       u64 sum = 0;
       for (u64 i = 0; i < r.nblocks; i++) sum += bc[i];
 /* GPU audit: compare sampled CPU segments against the GPU blocks. */
-      u64 mism = 0;
+      u64 mism = 0, aud = 0;
       if ((u64)30 * B % GPU_BLOCK_VALS != 0) { mism = 1; }
       else {
         u64 csegs = n / ((u64)30 * B);
         u64 step = (csegs > 512) ? (csegs / 512U) : 1;
-        u64 aud = 0;
         /* always include the first and the last CPU segment window */
         u64 aiList[1024]; u64 nc = 0;
         for (u64 ai = 0; ai < csegs && nc < 1023; ai += step) aiList[nc++] = ai;
@@ -655,7 +674,12 @@ int main(int argc, char** argv) {
           u64 segLo = aiList[x] * (u64)30 * B;
           u64 segHi = segLo + (u64)30 * B;
           if (segHi > n) segHi = n;
-          u64 cpuCnt = sieve_slice(segLo, segLo, segHi, B, smallMax, medMax, pl, npl);
+          /* CPU audit window must use the same cap convention as the GPU
+             blocks: a full segment owns candidates up to segHi+1 (the
+             trailing offset-31 candidate), the final window counts < n. */
+          u64 segCap = segHi + 2;
+          if (segCap > n) segCap = n;
+          u64 cpuCnt = sieve_slice(segLo, segLo, segCap, B, smallMax, medMax, pl, npl);
           u64 gpuCnt = 0;
           u64 k0 = segLo / GPU_BLOCK_VALS;
           u64 k1 = (segHi + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
@@ -668,6 +692,8 @@ int main(int argc, char** argv) {
       if (mism == 0) {
         if (n >= 5) sum += 3; else if (n >= 3) sum += 2; else if (n >= 2) sum += 1;
         pi = sum;
+        fprintf(stderr, "GPU audit passed (%llu segments sampled) - device: %s, kernel %.3f s\n",
+                (unsigned long long)aud, r.device, r.gpu_secs);
       } else {
         gpuFellBack = 1;
 	fprintf(stderr, "GPU audit: %llu mismatches - falling back to CPU\n",
@@ -706,8 +732,7 @@ int main(int argc, char** argv) {
   }
 
   free(pl);
-  QueryPerformanceCounter(&t1);
-  double sec = (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+  double sec = now_sec() - t0;
   printf("pi(%llu) = %llu\n", (unsigned long long)n, (unsigned long long)pi);
   printf("Seconds: %.3f\n", sec);
   return 0;

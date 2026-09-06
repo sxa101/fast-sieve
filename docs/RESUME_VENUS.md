@@ -89,35 +89,100 @@ build.bat/tests.bat, README.md, LICENSE, docs/{DESIGN,GPU,WHEEL210,RESUME_VENUS}
 
 GPU (OpenCL, RX 9070 XT, unreliably-exact proto): 1e8 in ≈7 ms
 (~14–16 Gcandidates/s). Reference-class GPU sieves: CUDASieve GTX1080 counted
-1e12 in 12.5 s → modern cards have several× more headroom; our CUDA port on
-venus should target ≈4–10× the 12-thread CPU here.
+1e12 in 12.5 s → modern cards have several× more headroom.
 
-## 6. GPU open TODOs (in priority order for venus)
+## 6. GPU open TODOs (status after the 2026-09-06 venus session)
 
-1. **CUDA port of `gpu.c` kernel** (translate OpenCL C → CUDA C, threads
-   256/block, `__shared__ seg[16384]`, `atomicAnd` on shared `uint`, popcount
-   via `__popcll`, one block per `30·16384` sub-range). CUDA's well-defined
-   shared semantics + `__syncthreads` should make the kernel bit-exact → the
-   audit passes and full speed is used. Verify with §4 sweep + audit.
-2. **Nail the remaining OpenCL/RDNA4 residual** (~±0.4/block, deterministic):
-   audit currently catches & falls back. Best lead: verify each block content
-   against the CPU reference for the FIRST differing block (the `--blockdump`
-   idea) rather than patching blind.
-3. **GPU pre-sieve (AND pattern init)** to cut work an extra ~2×.
-4. **Re-land wheel-210** on CPU (see `docs/WHEEL210.md` checklist) now that the
-   residue-1/offset-31 and frame-carry traps are documented.
+1. ✅ **CUDA port of `gpu.c` kernel — DONE, bit-exact.** `gpu_cuda.cu`
+   (256 threads/block, `__shared__` 16 KiB segment, word-level `atomicAnd`,
+   `__popcll` counting, one block per 30·16384 sub-range). Audit passes with
+   **0 mismatches** on RTX 3090 and RTX 3080 Ti; full sweep (1e2..1e12, -t1/-t12,
+   incl. boundary primes 786431²/786433²) is **24/24 exact** via
+   `./tests.sh ./fastsieve --gpu`.
+2. ✅ **RDNA4 OpenCL residual — ROOT-CAUSED (not a race, not the driver).**
+   Two *logical* block-boundary bugs, now fixed in BOTH `gpu.c` and
+   `gpu_cuda.cu`:
+   - the kernel's `cup[]` table was `CUNIT[r] − 1` (the phantom candidate `1`
+     was subtracted twice): `nbits` came out one short for `rem ∈ [2,6]`;
+   - `if (rel > 30·SEG_BYTES) rel = 30·SEG_BYTES` clamped away exactly the
+     `cap = segEnd + 2` case of every full block, so the trailing candidate
+     `segEnd+1` (offset-31 bit of the last byte) was dropped from the count.
+     The crossing side had the same holes (`v < segEnd` guard,
+     `qmax = segEnd/p`, `pp >= segEnd` break) — composites/primes equal to
+     `segEnd+1` were silently skipped.
+   Together this produced the deterministic ~±1-per-boundary-prime residual
+   that the audit kept catching. `fastsieve.c`'s audit window now uses the same
+   cap convention (`segHi+2` when `segHi < n`). **The dev box should re-run the
+   OpenCL path — with these fixes it may pass with no fallback.**
+3. ⬜ **CUDA kernel performance (next session's main item).** The kernel is
+   division-bound: two 64-bit divisions per active prime per block
+   (`q0 = ceil(v0/p)`, `qmax = (segEnd+1)/p`), and lanes idle for
+   `p > 491520/256`. 1e12 kernel = 836 s on the 3090 vs 257 s CPU-12t.
+   Ideas: reciprocal-multiply + ≤2 corrections (pass 1/p from host), skip the
+   division when `pp ≥ segLow+7` (then `q0 = p`), process several blocks per
+   CTA, CUDASieve-style per-prime wheel state, GPU pre-sieve (AND-pattern
+   init, ~2×).
+4. ⬜ **GPU pre-sieve (AND pattern init)** to cut work an extra ~2×.
+5. ⬜ **Re-land wheel-210** on CPU (see `docs/WHEEL210.md` checklist) — still
+   reverted, still honest.
 
-## 7. venus/CUDA quickstart
+## 7. venus/CUDA quickstart (verified verbatim)
 
 ```
-git clone <repo> fastsieve && cd fastsieve
-# CPU:  gcc -O3 -march=native -fopenmp fastsieve.c gpu.c -o fastsieve_cpu
-# CUDA: nvcc -O3 -arch=sm_86 gpu_cuda.cu fastsieve.c -o fastsieve
-# (add gpu_cuda.c + a --gpu dispatch; keep the audit-fallback logic in fastsieve.c)
-# sanity:
+# oracle
+git clone -q --depth 1 https://github.com/kimwalisch/primesieve.git /tmp/primesieve
+cmake -S /tmp/primesieve -B /tmp/primesieve/build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$HOME/.local && \
+cmake --build /tmp/primesieve/build -j12 && cmake --install /tmp/primesieve/build
+export PATH=$HOME/.local/bin:$PATH
+
+# CPU
+gcc -O3 -march=native -fopenmp fastsieve.c gpu.c -o fastsieve_cpu
+# CUDA (device select via FASTSIEVE_DEVICE=0/1; debug block dump via
+#       FASTSIEVE_DUMP_BLOCK=k -> /tmp/gpublock.bin)
+nvcc -O3 -arch=sm_86 -Xcompiler "-fopenmp -march=native -O3" \
+     fastsieve.c gpu_cuda.cu -o fastsieve
+# sanity + full sweep
 ./fastsieve_cpu 1e10 && ./fastsieve_cpu -t 12 1e12
-./fastsieve --gpu 1e11          # expect audit to pass on Turing/Ampere
+./tests.sh ./fastsieve_cpu        # 24/24
+./tests.sh ./fastsieve --gpu      # 24/24, audit 0 mismatches
 ```
+
+---
+
+## 8. venus session report (2026-09-06)
+
+Host: Linux, i5-11600 (12t), gcc 13.3, CUDA 13.1, RTX 3080 Ti (CUDA dev 1) +
+RTX 3090 (CUDA dev 0). Oracle: primesieve 12.16 built to `~/.local`.
+
+**What was done**
+
+* Portability: `fastsieve.c` + `gpu.c` now build on Linux/gcc (`_WIN32` guards,
+  `clock_gettime` timing, `__builtin_popcountll`, OpenCL stub returns ok=0).
+  MSVC/Windows path untouched.
+* CUDA port: `gpu_cuda.cu` (see §6.1) — exact on both cards, audit passes
+  everywhere.
+* **Found and fixed the block-boundary logic bug family** (§6.2) in the GPU
+  kernels and aligned `fastsieve.c`'s audit window with the cap convention.
+  Debug tooling left in the repo: `FASTSIEVE_DUMP_BLOCK=k` (production-kernel
+  block dump), `debugdump.cu`, `blockdiff.cu`, `blockcmp.c`.
+* `tests.sh`: bash port of the test suite (24 checks, needs primesieve CLI).
+* Full verification: CPU sweep 24/24, GPU sweep 24/24 (3090), spot-checked
+  exact on 3080 Ti (1e8..1e11), boundary primes exact on both paths.
+
+**venus benchmarks**
+
+| n     | ours CPU 1t | ours CPU 12t | psieve 1t | psieve 12t | ours GPU 3090 | ours GPU 3080 Ti |
+|-------|------------:|-------------:|----------:|-----------:|--------------:|-----------------:|
+| 1e9   | 0.21 s      | 0.07 s       | 0.10 s    | 0.02 s     | 0.027 s       | 0.030 s          |
+| 1e10  | 2.4 s       | 0.50 s       | 1.2 s     | 0.29 s     | 0.93 s        | 0.96 s           |
+| 1e11  | –           | –            | –         | –          | 29.4 s        | 30.3 s           |
+| 1e12  | 510 s       | 257 s        | 267 s     | 163 s      | 836 s         | –                |
+
+All GPU numbers are **exact π values with audit passed** (kernel-only time via
+CUDA events; wall time adds the audit's 512 CPU segments). Honest status: the
+GPU kernel is correctness-first and currently *slower* than the 12-thread CPU
+past 1e10 — §6.3 lists the concrete optimization plan.
 
 ---
 
@@ -126,22 +191,25 @@ git clone <repo> fastsieve && cd fastsieve
 ```
 You are resuming the "fastsieve" project. Read (in order):
   README.md, docs/DESIGN.md, docs/GPU.md, docs/WHEEL210.md, docs/RESUME_VENUS.md.
+State: CPU engine exact (gcc build, 24/24 sweep incl. boundary primes); CUDA
+port gpu_cuda.cu is BIT-EXACT on RTX 3090/3080 Ti (audit 0 mismatches, 24/24
+GPU sweep); the old OpenCL/RDNA4 residual was root-caused as logical
+block-boundary bugs (cup/CUNIT off-by-one + rel clamp dropping the trailing
+segEnd+1 candidate) and fixed in both gpu.c and gpu_cuda.cu.
 Mission (in priority order):
- 1) Build the CPU engine on this Linux/CUDA host (gcc -O3 -march=native -fopenmp),
-    verify pi() exactly matches primesieve for 1e8..1e12 at -t1 and -t12, incl.
-    boundary primes 618473717761 and 618476863489.
- 2) Port the OpenCL GPU kernel in gpu.c to CUDA (RTX 3090/3080, sm_86), keeping
-    the audit-and-fallback design: GPU per-block counts must match the exact CPU
-    engine on ~512 sampled segments + first/last, else fall back to CPU. Target:
-    GPU exact on CUDA (shared-memory + atomicAnd + __syncthreads), measure and
-    benchmark vs primesieve -tN.
- 3) Fix the recorded OpenCL/RDNA4 deterministic residual (~±0.4/block) if time
-    allows, and/or re-land wheel-210 per docs/WHEEL210.md.
- 4) Update docs/RESUME_VENUS.md and the benchmark table with venus results,
-    then commit + push to the public repo.
+ 1) Make the CUDA kernel FAST while keeping it bit-exact. It is division-bound
+    (2 x u64 div per active prime per block) and lane-idle for p > 1920:
+    reciprocal-multiply + corrections (pass 1/p from host), q0 = p shortcut
+    when pp >= segLow+7, multi-block CTAs, then GPU pre-sieve (~2x more).
+    After EACH change: full audit + ./tests.sh ./fastsieve --gpu must stay
+    24/24 and bit-exact; re-benchmark 1e9..1e12 vs primesieve -tN.
+ 2) On the dev box (RDNA4/OpenCL), re-run the GPU path with the fixed gpu.c:
+    the audit should now pass with no fallback; update docs/GPU.md.
+ 3) If time allows, re-land wheel-210 per docs/WHEEL210.md.
+ 4) Update docs/RESUME_VENUS.md + benchmark tables with new results, then
+    commit + push.
 
-Rules: never claim exactness without the byte/oracle check described in
-docs/RESUME_VENUS.md §4; if a GPU result equals the CPU oracle in the sweep,
-say so; otherwise the audit MUST fall back and you must report it. Keep the
-exact π(n) contract of the tool (printed value must always be exact).
+Rules: never claim exactness without the byte/oracle check in
+docs/RESUME_VENUS.md §4; keep the audit-and-fallback design and the exact
+π(n) contract (printed value must always be exact).
 ```

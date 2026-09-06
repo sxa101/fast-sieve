@@ -6,4 +6,8 @@ build/
 third_party/
 __pycache__/
 .venv/
-*.log
+*.logfastsieve
+fastsieve_cpu
+debugdump
+blockdiff
+blockcmp
