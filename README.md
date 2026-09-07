@@ -102,7 +102,10 @@ powershell -ExecutionPolicy Bypass .\tests.ps1
 
 ## Performance
 
-CPU engine, AMD Ryzen 5 5600G, MSVC /O2 /arch:AVX2:
+### CPU — Windows dev box (Ryzen 5 5600G, MSVC /O2 /arch:AVX2)
+
+Measured before the L1-chunk fix described below; expect a similar gain on
+re-measurement.
 
 | n     | ours 1 core | ours 12 threads | primesieve 1 core | primesieve 12 threads |
 |-------|------------:|----------------:|------------------:|----------------------:|
@@ -110,12 +113,7 @@ CPU engine, AMD Ryzen 5 5600G, MSVC /O2 /arch:AVX2:
 | 1e10  | 1.9 s       | 0.36 s          | 1.1 s             | 0.25 s                |
 | 1e12  | 290 s       | 52 s            | 167 s             | 31 s                  |
 
-We are consistently ~1.5–1.7× behind primesieve: its compile-time-unrolled
-Duff's-device residue loops with immediate bit masks cannot be emitted by MSVC
-from our runtime-generated tables. That is the single declared gap.
-
-**NVIDIA reference box** (Intel i5-11600, 12 threads, gcc 13 -O3 -march=native;
-CUDA, RTX 3090):
+### CPU + GPU — Linux/CUDA reference box (i5-11600, gcc 13; RTX 3090)
 
 | n     | ours CPU 1t | ours CPU 12t | primesieve 1t | primesieve 12t | ours GPU (kernel) |
 |-------|------------:|-------------:|--------------:|---------------:|------------------:|
@@ -124,10 +122,14 @@ CUDA, RTX 3090):
 | 1e11  | –           | –            | –             | –              | 1.6 s             |
 | 1e12  | 429 s       | 218 s        | 267 s         | 163 s          | 17.9 s            |
 
-The Linux benchmark host is shared (bursty neighbor load, ±20% on wall times); ratios are
-the meaningful signal. CPU numbers include the L1-chunk fix
-([docs/CPU_PERF.md](docs/CPU_PERF.md)); single-thread gap to primesieve is now
-~1.1–1.3× (was ~1.9×), 12-thread at parity or ahead at ≥1e10.
+The historical ~1.5–1.9× single-thread gap to primesieve was traced to a
+chunking bug: the small-prime crossing swept 256 KiB chunks from L2 instead of
+32 KiB chunks from L1D. Fixing it was worth **40–50% single-thread** — the gap
+is now ~1.1–1.3× single-thread, and 12 threads are at parity or ahead of
+primesieve at ≥ 1e10, with no code-generation tricks (the primesieve-style
+Duff's-device loop was built, measured and parked — it stopped mattering once
+the working set fit L1). Full analysis, profile and remaining options:
+[docs/CPU_PERF.md](docs/CPU_PERF.md).
 
 The CUDA kernel is **bit-exact** (audit passes everywhere), and the fixed
 OpenCL kernel is now also bit-exact on the RX 9070 XT (audit passes, no
