@@ -95,61 +95,96 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
 #define L1_CHUNK        (32u << 10)
 #define PRESIEVE_MAX    163           /* multiples of p<=163 presieved */
 /* ------------------------------------------------------------------ */
-/* Wheel-30 crossing tables                                           */
+/* Wheel-210 crossing tables                                           */
 /* ------------------------------------------------------------------ */
-/* A mod-30 wheel: crossings only touch multiples p*k whose quotient k
-   is coprime to 2,3,5.  The step cycle has 8 states.  (A mod-210 wheel
-   that additionally skips multiples of 7 would cut crossings ~14% but
-   was found to mis-frame a rare fraction of carries in multi-segment
-   runs, so the proven wheel-30 is used.)                                  */
-static const int OFFB[8] = { 7, 11, 13, 17, 19, 23, 29, 31 };
-static const int UNITS[8] = { 1, 7, 11, 13, 17, 19, 23, 29 };
+/* A mod-210 wheel: candidates are the 48 residues coprime to 210, stored
+   48 bits (6 bytes) per 210 numbers: bit m (0..46) of block j holds value
+   210j + RES210[m+1], bit 47 holds 210j + 211 (= the next block's residue-1
+   candidate - the wheel-30 offset-31 trick generalized).  Quotients q of
+   every multiple p*q must be coprime to 210, so the step cycle has 48
+   states: crossing work drops by (48/210)/(8/30) = 6/7, and 7 (pre-sieved
+   anyway) joins 2,3,5 as an out-of-band prime. */
+static u16 RES210[48];        /* [0] = 1, then sorted coprime residues 11..209 */
+static u8  MIDX210[210];      /* coprime r -> bit index m within 6-byte block (47 for r==1) */
+static u8  CNT210[210];       /* # coprime residues < r (incl. 1) */
+static u8  NEXT210[210];      /* next coprime residue >= r */
+static u8  KMAP210[210];      /* coprime residue -> class index 0..47 */
+static u16 CV210[48][48];     /* [class][state] byte step = CV*sp + CB; CV = 6*dq */
+static u16 CB210[48][48];     /* byte-index remainder of the step */
+static u8  BM210[48][48];     /* AND mask clearing the current multiple */
+static u8  PRIMEBITS210[6];   /* true primes in block 0 of the first segment */
 
-static u8  BIT_[8][8];   /* AND masks clearing the current multiple */
-static u8  CV_[8][8];    /* byte-index multipliers per step        */
-static u8  CB_[8][8];    /* byte-index offsets per step            */
-static u8  r2idx[30];    /* p mod 30 -> residue class (0..7)       */
-static u8  KMAP[30];     /* unit residue -> step index             */
-static u8  NEXTUNIT[30]; /* first unit residue >= r                */
-static u8  ISUNIT[30];
-static int bit_of_offset(int off) {
-  for (int b = 0; b < 8; b++)
-    if (OFFB[b] == off) return b;
-  return -1;
+/* bit-global index of candidate value v on the 210 grid: bg/8 = byte index */
+static long long bg210(long long v) {
+  long long r = v % 210;
+  if (r == 1) return 48LL * ((v - 1) / 210 - 1) + 47;  /* offset-211 rule */
+  return 48LL * ((v - (long long)r) / 210) + MIDX210[r];
 }
 static void build_cross_tables(void) {
-  for (int r = 0; r < 30; r++) { ISUNIT[r] = 0; KMAP[r] = 255; r2idx[r] = 255; }
-  for (int k = 0; k < 8; k++) r2idx[OFFB[k] % 30] = (u8)k;
-  for (int j = 0; j < 8; j++) { ISUNIT[UNITS[j]] = 1; KMAP[UNITS[j]] = (u8)j; }
-
-  for (int k = 0; k < 8; k++) {
-    int ri = OFFB[k] % 30;
-    for (int j = 0; j < 8; j++) {
-      int kk      = UNITS[j];
-      int off     = (ri * kk) % 30;         /* value of the multiple mod 30 */
-      int dk      = (j < 7) ? (UNITS[j+1] - UNITS[j]) : (31 - UNITS[7]);
-      /* byte delta of the step = dk*sp + cb with cb = floor((g + ri*dk)/30),
-         g = (value - low - 6) mod 30 */
-      int g       = (off - 6 + 30) % 30;
-      int cb      = (g + ri * dk) / 30;
-      int bitOff  = (off == 1) ? 31 : off;
-      int b       = bit_of_offset(bitOff);
-      BIT_[k][j]  = (u8)~(1u << b);
-      CV_[k][j]   = (u8)dk;
-      CB_[k][j]   = (u8)cb;
+  int nn = 0;
+  for (int r = 1; r < 210; r++)
+    if (r % 2 && r % 3 && r % 5 && r % 7) {
+      KMAP210[r] = (u8)nn; RES210[nn] = (u16)r; nn++;
+    }
+  if (nn != 48) { fprintf(stderr, "wheel-210: bad residue count %d\n", nn); exit(1); }
+  /* NEXT210 init must complete BEFORE the fill pass: filling inside this
+     loop let a later non-coprime r wipe NEXT210[r] back to the 210 marker,
+     so prime_init_state jumped q forward to a non-candidate multiple and
+     desynced every crossing for that prime (the historical wheel-210 bug). */
+  for (int r = 0; r < 210; r++) { NEXT210[r] = 210; MIDX210[r] = 255; CNT210[r] = 0; }
+  for (int r = 0; r < 210; r++) {
+    if (r % 2 && r % 3 && r % 5 && r % 7) {
+      /* bit index: RES210[0] = 1 is the unstored phantom -> bit 47 of the
+         PREVIOUS block; stored residues RES210[1..47] map to bits 0..46 */
+      MIDX210[r] = (r == 1) ? 47 : (u8)(KMAP210[r] - 1);
+      for (int q = r; q < 210; q++) if (NEXT210[q] == 210) NEXT210[q] = (u8)r;
     }
   }
-  for (int r = 0; r < 30; r++) {
-    int u = r;
-    while (!ISUNIT[u]) u++;
-    NEXTUNIT[r] = (u8)(u % 30);
+  for (int r = 0; r < 210; r++) {
+    int c = 0;
+    for (int q = 1; q < r; q++) if (q % 2 && q % 3 && q % 5 && q % 7) c++;
+    CNT210[r] = (u8)c;
+  }
+  /* crossing steps: state t = quotient residue class RES210[t].  The step
+     t -> t+1 advances the quotient by dq; the multiple's residue moves from
+     r1 = rk*RES210[t] mod 210 to r2 = rk*RES210[t+1] mod 210.
+     byte delta = 6*dK + (m2 - m1)/8 with dK = (rk*dq - r2 + r1)/210, split
+     as byte delta = CV*dq*sp + CB with
+     CB = 6*(rk*dq - r2 + r1)/210 + (m2 - m1)/8  (>= 0: without 210-wrap
+     m2 >= m1; with wrap the +6 of the crossed block dominates). */
+  for (int k = 0; k < 48; k++) {
+    int rk = RES210[k];
+    for (int t = 0; t < 48; t++) {
+      int tq = RES210[t], nq = RES210[(t + 1) % 48];
+      int dq = nq - tq; if (dq < 0) dq += 210;
+      long long v1 = 210000LL + (rk * (long long)tq) % 210;
+      /* p = 210*sp + rk: the step p*dq splits into 210*sp*dq (whole blocks,
+         6 bytes each -> 6*dq*sp) plus rk*dq, whose byte cost is CB below */
+      long long cb = bg210(v1 + rk * (long long)dq) / 8 - bg210(v1) / 8;
+      if (cb < 0 || cb > 60000) {
+        fprintf(stderr, "wheel-210: bad step k=%d t=%d cb=%lld\n", k, t, cb);
+        exit(1);
+      }
+      CV210[k][t] = (u16)(6 * dq); CB210[k][t] = (u16)cb;
+      BM210[k][t] = (u8)~(1u << (MIDX210[(rk * (long long)tq) % 210] & 7));
+    }
+  }
+  /* block 0 of the very first segment: true primes among the candidates */
+  for (int m = 0; m < 48; m++) {
+    u64 v = (m == 47) ? 211ULL : (u64)RES210[m + 1];
+    int isP = 1;
+    for (u64 d = 2; d * d <= v; d++) if (v % d == 0) { isP = 0; break; }
+    if (isP) PRIMEBITS210[m / 8] |= (u8)(1u << (m & 7));
   }
 }
 /* ------------------------------------------------------------------ */
-/* Pre-sieve tables                                                   */
+/* Pre-sieve tables (210 grid: 6-byte blocks, 48 candidates each)      */
 /* ------------------------------------------------------------------ */
+/* 7 dropped from the first group: on the 210 grid no candidate is a
+   multiple of 7, so that mask would be vacuous (and 7's period would
+   needlessly multiply the table size).  Table periods are in 210-blocks. */
 static const u32 PSMIN[16][3] = {
-  { 7, 23, 37 }, { 11, 19, 31 }, { 13, 17, 29 }, { 41, 163 },
+  { 23, 37, 0 }, { 11, 19, 31 }, { 13, 17, 29 }, { 41, 163 },
   { 43, 157 }, { 47, 151 }, { 53, 149 }, { 59, 139 },
   { 61, 137 }, { 67, 131 }, { 71, 127 }, { 73, 113 },
   { 79, 109 }, { 83, 107 }, { 89, 103 }, { 97, 101, 0 }
@@ -158,26 +193,25 @@ static u8* PSD[16];
 static u32 PSS[16];
 static void build_pre_sieve_tables(void) {
     for (int t = 0; t < 16; t++) {
-    u64 size = 1;
+    u64 size = 1;                             /* period in 210-blocks */
     for (int j = 0; j < 3; j++) {
       if (PSMIN[t][j] == 0) break;
       size *= (u64)PSMIN[t][j];
     }
-    u8* tab = (u8*)malloc((size_t)size);
+    u8* tab = (u8*)calloc((size_t)(size + 16) * 6, 1); /* +16: tile pad */
     if (!tab) { fprintf(stderr, "out of memory\n"); exit(1); }
-    for (u64 j = 0; j < size; j++) {
-      u8 byte = 0;
-      for (int b = 0; b < 8; b++) {
-        u64 v = (u64)30 * j + (u64)OFFB[b];
+    for (u64 j = 0; j < size + 16; j++) {     /* pad: head replicated */
+      u64 jj = j < size ? j : j - size;
+      for (int m = 0; m < 48; m++) {
+        u64 v = (u64)210 * jj + (m == 47 ? 211ULL : (u64)RES210[m + 1]);
         int ok = 1;
         for (int c = 0; c < 3; c++) {
           u32 p = PSMIN[t][c];
           if (p == 0) break;
           if (v % p == 0) { ok = 0; break; }
         }
-        if (ok) byte |= (u8)(1u << b);
+        if (ok) tab[j * 6 + m / 8] |= (u8)(1u << (m & 7));
       }
-      tab[j] = byte;
     }
     PSD[t] = tab;
     PSS[t] = (u32)size;
@@ -185,48 +219,45 @@ static void build_pre_sieve_tables(void) {
 }
 static void pre_sieve(u8* s, u64 B, u64 segLow) {
   u32 pos[16];
+  u64 nb = B / 6;                             /* 210-blocks in segment */
   for (int t = 0; t < 16; t++)
-    pos[t] = (u32)((segLow % ((u64)PSS[t] * 30)) / 30);
-  u64 off = 0;
-  while (off < B) {
-    u64 L = B - off;
-    for (int t = 0; t < 16; t++) {
-      u64 rem = (u64)PSS[t] - pos[t];
-      if (rem < L) L = rem;
+    pos[t] = (u32)((segLow % ((u64)PSS[t] * 210)) / 210);
+  u64 b = 0;
+  while (b < nb) {
+    u64 L = nb - b; if (L > 16) L = 16;
+    u8* d = s + 6 * b;
+    if (L == 16) {
+      __m256i v0 = _mm256_loadu_si256((const __m256i*)(PSD[0]  + 6 * pos[0]));
+      __m256i v1 = _mm256_loadu_si256((const __m256i*)(PSD[0]  + 6 * pos[0] + 32));
+      __m256i v2 = _mm256_loadu_si256((const __m256i*)(PSD[0]  + 6 * pos[0] + 64));
+      __m256i w;
+#define FS_AND(t) \
+      w = _mm256_loadu_si256((const __m256i*)(PSD[t] + 6 * pos[t])); \
+      v0 = _mm256_and_si256(v0, w); \
+      w = _mm256_loadu_si256((const __m256i*)(PSD[t] + 6 * pos[t] + 32)); \
+      v1 = _mm256_and_si256(v1, w); \
+      w = _mm256_loadu_si256((const __m256i*)(PSD[t] + 6 * pos[t] + 64)); \
+      v2 = _mm256_and_si256(v2, w);
+      FS_AND(1) FS_AND(2) FS_AND(3) FS_AND(4) FS_AND(5) FS_AND(6) FS_AND(7)
+      FS_AND(8) FS_AND(9) FS_AND(10) FS_AND(11) FS_AND(12) FS_AND(13) FS_AND(14) FS_AND(15)
+#undef FS_AND
+      _mm256_storeu_si256((__m256i*)(d), v0);
+      _mm256_storeu_si256((__m256i*)(d + 32), v1);
+      _mm256_storeu_si256((__m256i*)(d + 64), v2);
+    } else {
+      for (u64 j = 0; j < L; j++) {
+        for (int q = 0; q < 6; q++) d[6 * j + q] = PSD[0][6 * (pos[0] + j) + q];
+        for (int t = 1; t < 16; t++)
+          for (int q = 0; q < 6; q++) d[6 * j + q] &= PSD[t][6 * (pos[t] + j) + q];
+      }
     }
-    u64 i = 0;
-    for (; i + 32 <= L; i += 32) {
-      __m256i v = _mm256_loadu_si256((const __m256i*)(PSD[0] + pos[0] + i));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[1] + pos[1] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[2] + pos[2] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[3] + pos[3] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[4] + pos[4] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[5] + pos[5] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[6] + pos[6] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[7] + pos[7] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[8] + pos[8] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[9] + pos[9] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[10] + pos[10] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[11] + pos[11] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[12] + pos[12] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[13] + pos[13] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[14] + pos[14] + i)));
-      v = _mm256_and_si256(v, _mm256_loadu_si256((const __m256i*)(PSD[15] + pos[15] + i)));
-      _mm256_storeu_si256((__m256i*)(s + off + i), v);
-    }
-    for (; i < L; i++) {
-      u8 b = PSD[0][pos[0] + i];
-      for (int t = 1; t < 16; t++) b &= PSD[t][pos[t] + i];
-      s[off + i] = b;
-    }
-    off += L;
+    b += L;
     for (int t = 0; t < 16; t++) {
       pos[t] += (u32)L;
       if (pos[t] >= PSS[t]) pos[t] -= PSS[t];
     }
   }
 }
-static const u8 PRIMEBITS[8] = { 0xff, 0xef, 0x77, 0x3f, 0xdb, 0xed, 0x9e, 0xfc };
 /* ------------------------------------------------------------------ */
 /* Sieving-prime storage                                               */
 /* ------------------------------------------------------------------ */
@@ -238,11 +269,15 @@ typedef struct { u32 sp; u32 i; u8 k; u8 t; } SPF;
 typedef struct { u32 sp; u32 i; u8 k; u8 t; u32 next; } SPN;
 
 /* stage index after the current one (t in 0..7) */
-static inline u8 tinc(u8 t) { return (u8)((t + 1) & 7U); }
+static inline u8 tinc(u8 t) { return (u8)((t + 1) % 48U); }
 
 /* ------------------------------------------------------------------ */
 /* Crossing (flat class)                                               */
 /* ------------------------------------------------------------------ */
+/* The 48-step cycle runs as 6 sub-batches of 8 stores each (same shape as
+   the wheel-30 loop, 48-wide tables).  t advances 8 per sub-batch, so a
+   mid-cycle one-segment carry exits with the correct mid-cycle state -
+   exactly the "advance exactly ONE segment per call" rule of trap 3.3. */
 static void cross_flat(u8* s, u64 B, SPF* P, u64 np)
 {
   for (u64 n = 0; n < np; n++) {
@@ -254,46 +289,50 @@ static void cross_flat(u8* s, u64 B, SPF* P, u64 np)
     if (i >= B) { P[n].i = (u32)(i - B); continue; }
     u8 k = P[n].k;
     u8 t = P[n].t;
-    const u8* cv = CV_[k];   /* step byte-index multiplier  */
-    const u8* cb = CB_[k];   /* step byte-index offset      */
-    const u8* bit = BIT_[k];
+    u8 exT = t;
+    const u16* cv = CV210[k];   /* step byte-index multiplier (6*dq, u16) */
+    const u16* cb = CB210[k];  /* step byte-index offset      */
+    const u8* bit = BM210[k];
 
-    /* offsets of the next 8 multiples relative to the current one */
-    u32 st = t, st1, st2, st3, st4, st5, st6, st7;
-    u32 o1 = (u32)cv[st] * sp + cb[st], o2, o3, o4, o5, o6, o7, stride;
-    st1 = (st + 1) & 7; st2 = (st1 + 1) & 7; st3 = (st2 + 1) & 7; st4 = (st3 + 1) & 7;
-    st5 = (st4 + 1) & 7; st6 = (st5 + 1) & 7; st7 = (st6 + 1) & 7;
-    o2 = o1 + (u32)cv[st1] * sp + cb[st1];
-    o3 = o2 + (u32)cv[st2] * sp + cb[st2];
-    o4 = o3 + (u32)cv[st3] * sp + cb[st3];
-    o5 = o4 + (u32)cv[st4] * sp + cb[st4];
-    o6 = o5 + (u32)cv[st5] * sp + cb[st5];
-    o7 = o6 + (u32)cv[st6] * sp + cb[st6];
-    stride = o7 + (u32)cv[st7] * sp + cb[st7];
-
-    for (;;) {
-      if (i + o7 >= B) break;
-      s[i]      &= bit[st];
-      s[i + o1] &= bit[st1];
-      s[i + o2] &= bit[st2];
-      s[i + o3] &= bit[st3];
-      s[i + o4] &= bit[st4];
-      s[i + o5] &= bit[st5];
-      s[i + o6] &= bit[st6];
-      s[i + o7] &= bit[st7];
-      i += stride;
-      if (i >= B) { i -= B; goto done_flat; }
+    for (;;) {                                   /* per 48-step cycle */
+      u8 st = t;
+      for (int sb = 0; sb < 6; sb++) {
+        u32 st1 = (u32)(st + 1) % 48, st2 = (st + 2) % 48, st3 = (st + 3) % 48;
+        u32 st4 = (st + 4) % 48, st5 = (st + 5) % 48, st6 = (st + 6) % 48, st7 = (st + 7) % 48;
+        u32 o1 = (u32)cv[st]  * sp + cb[st];
+        u32 o2 = o1 + (u32)cv[st1] * sp + cb[st1];
+        u32 o3 = o2 + (u32)cv[st2] * sp + cb[st2];
+        u32 o4 = o3 + (u32)cv[st3] * sp + cb[st3];
+        u32 o5 = o4 + (u32)cv[st4] * sp + cb[st4];
+        u32 o6 = o5 + (u32)cv[st5] * sp + cb[st5];
+        u32 o7 = o6 + (u32)cv[st6] * sp + cb[st6];
+        u32 stride = o7 + (u32)cv[st7] * sp + cb[st7];
+        if (i + o7 >= B) { t = (u8)st; goto tail; }
+        s[i]      &= bit[st];
+        s[i + o1] &= bit[st1];
+        s[i + o2] &= bit[st2];
+        s[i + o3] &= bit[st3];
+        s[i + o4] &= bit[st4];
+        s[i + o5] &= bit[st5];
+        s[i + o6] &= bit[st6];
+        s[i + o7] &= bit[st7];
+        i += stride;
+        st = (u8)((st + 8) % 48);
+        if (i >= B) { i -= B; exT = st; goto done_flat; }
+      }
+      t = st;                                    /* full cycle: t restored */
     }
 
     /* tail: finish the segment one multiple at a time */
+  tail:
     for (;;) {
-      if (i >= B) { i -= B; goto done_flat; }
+      if (i >= B) { i -= B; exT = t; goto done_flat; }
       s[i] &= bit[t];
       i += (u32)cv[t] * sp + cb[t];
       t = tinc(t);
     }
     done_flat:
-    P[n].i = (u32)i; P[n].t = t;
+    P[n].i = (u32)i; P[n].t = exT;
   }
 }
 /* ------------------------------------------------------------------ */
@@ -339,7 +378,7 @@ static void s_head_grow(State* st, u64 need) {
   st->nhead = ns;
 }
 static inline void sp_set(SPF* o, u64 p, u32 i, u8 k, u8 t) {
-  o->sp = (u32)(p / 30); o->i = i; o->k = k; o->t = t;
+  o->sp = (u32)(p / 210); o->i = i; o->k = k; o->t = t;
 }
 static void s_small_push(State* st, u32 i, u8 k, u8 t, u64 p) {
   if (st->nsml == st->smlcap) {
@@ -418,15 +457,8 @@ static inline u64 popcnt(u64 x) { return (u64)__popcnt64(x); }
 static inline u64 popcnt(u64 x) { return (u64)__builtin_popcountll(x); }
 #endif
 
-static u8 CUNIT[30];
-
 static void build_count_tables(void) {
-  for (int r = 0; r < 30; r++) {
-    u8 c = 0;
-    for (int k = 1; k < r; k++)
-      if (k % 2 && k % 3 && k % 5) c++;
-    CUNIT[r] = c;
-  }
+  /* CNT210 is built by build_cross_tables() from the same first principles */
 }
 
 /* Number of candidate bits with value < up (up absolute, inside or one
@@ -437,10 +469,10 @@ static u64 cbits_prefix(const u8* s, u64 B, u64 segLow, u64 up)
   const u64* w = (const u64*)s;
   if (up <= segLow) return 0;
   u64 rel = up - segLow;                 /* up > segLow */
-  if (rel > (u64)30 * B) rel = (u64)30 * B;
+  if (rel > (u64)35 * B) rel = (u64)35 * B;
   if (rel <= 1) return 0;
-  u64 nbits = (rel / 30) * 8 + (u64)CUNIT[rel % 30];
-  if (nbits) nbits -= 1;                 /* candidate "1" is not in the array */
+  u64 rr = rel % 210;
+  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1 + (rr < 2 ? 1u : 0u);
   if (nbits > B * 8) nbits = B * 8;
   u64 nf = nbits / 64, nb = nbits & 63;
   for (u64 i = 0; i < nf; i++) total += popcnt(w[i]);
@@ -453,14 +485,14 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
   u64 total = 0;
   const u64* w = (const u64*)s;
   u64 nw = B / 8;
-  if (segLow + (u64)30 * B < n) {   /* strictly: every candidate < n */
+  if (segLow + (u64)35 * B < n) {   /* strictly: every candidate < n */
     for (u64 i = 0; i < nw; i++) total += popcnt(w[i]);
     return total;
   }
   /* partial segment: number of candidate slots with value < n */
   u64 rel = n - segLow;
-  u64 nbits = (rel / 30) * 8 + (u64)CUNIT[rel % 30];
-  if (nbits) nbits -= 1;                 /* the candidate "1" is not in the array */
+  u64 rr = rel % 210;
+  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1 + (rr < 2 ? 1u : 0u);
   u64 nf = nbits / 64, nb = nbits & 63;
   for (u64 i = 0; i < nf; i++) total += popcnt(w[i]);
   if (nb) total += popcnt(w[nf] & ((1ull << nb) - 1));
@@ -471,25 +503,26 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
 /* ------------------------------------------------------------------ */
 static void prime_init_state(u64 p, u64 low, u32* outI, u8* outK, u8* outT)
 {
-  u8  k  = r2idx[p % 30];
-  u64 low6 = low + 6;              /* byte j covers [low+30j+7, low+30j+31] */
-  u64 q = low6 / p + 1;
+  u8  k  = KMAP210[p % 210];
+  u64 lowA = low + 11;             /* byte j covers [low+210j+11, low+210j+211] */
+  u64 q = lowA / p + 1;
   if (q < p) q = p;
-  u8  ur = (u8)(q % 30);           /* need a quotient coprime to 30 */
-  q += (u64)NEXTUNIT[ur] - ur;
+  u8  ur = (u8)(q % 210);          /* need a quotient coprime to 210 */
+  q += (u64)NEXT210[ur] - ur;
   u64 multiple = p * q;
-  u8  t = KMAP[q % 30];
-  u64 idx = (multiple - low6) / 30;
-  *outI = (u32)idx;
+  u8  t = KMAP210[q % 210];
+  u64 rel = multiple - lowA;       /* multiple - low - 11 */
+  u64 blk = rel / 210;             /* for r == 1 this already floors to K-1 */
+  u64 r   = (multiple - low) % 210;
+  u64 m   = MIDX210[r];            /* r == 1 -> bit 47 of the previous block */
+  *outI = (u32)(6 * blk + m / 8);
   *outK = k;
   *outT = t;
 }
 static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 medMax,
                        const u64* pl, u64 npl, fs_emit_cb emit, void* emitCtx)
 {
-  u64 logB = 0;
-  while ((1ull << logB) < B) logB++;
-  u64 maskB = B - 1;
+  u64 bps = B / 6;                             /* 210-blocks per segment */
   u8* sieve = (u8*)malloc((size_t)B);
   if (!sieve) { fprintf(stderr, "oom\n"); exit(1); }
   State st; memset(&st, 0, sizeof(st));
@@ -499,8 +532,8 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
   u64 total = 0;
   u64 segNo = 0;
   int stopped = 0;
-  for (u64 low = lo; low < cap; low += (u64)30 * B) {
-    u64 end = low + (u64)30 * B;
+  for (u64 low = lo; low < cap; low += (u64)35 * B) {
+    u64 end = low + (u64)35 * B;
     pre_sieve(sieve, B, low);
     /* add sieving primes whose p^2 lies inside [low, end) */
     while (gpos < npl) {
@@ -520,10 +553,10 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         s_med_push(&st, i0, k0, t0, p);
       else {
         /* bucketized: first multiple may lie several segments ahead */
-        u64 seg = i0 >> logB;
+        u64 seg = i0 / bps;
         u32 nd = s_node_new(&st);
-        st.nodes[nd].sp = (u32)(p / 30);
-        st.nodes[nd].i  = i0 & (u32)maskB;
+        st.nodes[nd].sp = (u32)(p / 210);
+        st.nodes[nd].i  = i0 % bps;
         st.nodes[nd].k  = k0;
         st.nodes[nd].t  = t0;
         s_big_relink(&st, nd, seg);
@@ -534,7 +567,7 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
       u64 w = 0;
       for (u64 x = 0; x < st.npend; x++) {
         if (st.pend[x].i >= B) st.pend[x].i -= (u32)B;
-        u64 pv = 30ull * st.pend[x].sp + (u64)(OFFB[st.pend[x].k] % 30);
+        u64 pv = 210ull * st.pend[x].sp + (u64)RES210[st.pend[x].k];
         if (st.pend[x].i < B) {
           if (pv <= smallMax)
             s_small_push(&st, st.pend[x].i, st.pend[x].k, st.pend[x].t, pv);
@@ -565,11 +598,11 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         u64 i  = st.nodes[nd].i;
         u8  k  = st.nodes[nd].k;
         u8  t  = st.nodes[nd].t;
-        sieve[i] &= BIT_[k][t];
-        u64 nxt = i + (u64)CV_[k][t] * sp + CB_[k][t];
+        sieve[i] &= BM210[k][t];
+        u64 nxt = i + (u64)CV210[k][t] * sp + CB210[k][t];
         t = tinc(t);
-        u64 seg = nxt >> logB;
-        u64 ii  = nxt & maskB;
+        u64 seg = nxt / bps;
+        u64 ii  = nxt % bps;
         st.nodes[nd].i = (u32)ii;
         st.nodes[nd].t = t;
         s_big_relink(&st, nd, seg);
@@ -577,7 +610,15 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
     }
     /* very first segment (low == 0): restore true small primes */
     if (lo == 0 && segNo == 0) {
-      for (int j = 0; j < 8 && j < (int)B; j++) sieve[j] = PRIMEBITS[j];
+      for (int j = 0; j < 6 && j < (int)B; j++) sieve[j] = PRIMEBITS210[j];
+    }
+    {
+      const char* denv = getenv("FASTSIEVE_DUMP_SEG");
+      if (denv && (u64)atoi(denv) == segNo) {
+        FILE* f = fopen("/tmp/segdump.bin", "wb");
+        if (f) { fwrite(sieve, 1, B, f); fclose(f); }
+        fprintf(stderr, "[dump] segment %llu -> /tmp/segdump.bin\n", (unsigned long long)segNo);
+      }
     }
     /* count candidates in [countLo, cap) within this segment */
     if (countLo > low)
@@ -587,26 +628,40 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
     /* optional on-the-fly prime emission over the same window */
     if (emit) {
       u64 from = (countLo > low) ? countLo : low;
-      if (low == 0 && segNo == 0) {   /* primes 2,3,5 are outside the wheel */
-        static const u64 S3[3] = {2, 3, 5};
-        for (int pp2 = 0; pp2 < 3; pp2++)
-          if (from <= S3[pp2] && S3[pp2] < cap) {
-            if (emit(S3[pp2], emitCtx)) { stopped = 1; break; }
+      if (low == 0 && segNo == 0) {   /* primes 2,3,5,7 are outside the wheel */
+        static const u64 S4[4] = {2, 3, 5, 7};
+        for (int pp2 = 0; pp2 < 4; pp2++)
+          if (from <= S4[pp2] && S4[pp2] < cap) {
+            if (emit(S4[pp2], emitCtx)) { stopped = 1; break; }
           }
       }
       if (!stopped) {
-        u64 jmin = (from > low + 7) ? (from - low - 7) / 30 : 0;
+        /* generous byte window around [from, cap): the per-candidate filter
+           below is exact; bounds only skip bytes that cannot qualify */
+        u64 jmin = 0;
+        if (from > low + 11) {
+          u64 d = from - low - 11;
+          jmin = 6 * (d / 210); if (jmin) jmin -= 6;
+        }
         u64 upv  = cap - 1;
-        u64 jmax = (upv > low + 7) ? (upv - low - 7) / 30 : 0;
-        if (jmax >= B) jmax = B - 1;
+        u64 jmax = B - 1;
+        if (upv > low + 11) {
+          u64 d = upv - low - 11;
+          jmax = 6 * (d / 210) + 6;
+          if (jmax > B - 1) jmax = B - 1;
+        }
         for (u64 j = jmin; j <= jmax; j++) {
           u8 byte = sieve[j];
           if (byte) {
-            static const u64 OFF[8] = {7, 11, 13, 17, 19, 23, 29, 31};
-            u64 base = low + 30 * j;
+            /* byte j = block j/6, sub-byte j%6; global bit index
+               g = 48*(j/6) + 8*(j%6) + b; value = 210*(g/48) +
+               (g%48 == 47 ? 211 : RES210[1 + g%48]) */
+            u64 blk = j / 6, sub = (j % 6) * 8;
             for (int b = 0; b < 8; b++)
               if (byte & (1u << b)) {
-                u64 v = base + OFF[b];
+                u64 g = 48 * blk + sub + (u64)b;
+                u64 v = 210 * (g / 48) + ((g % 48) == 47 ? 211ULL
+                                                         : (u64)RES210[1 + g % 48]);
                 if (v >= from && v < cap && emit(v, emitCtx)) { stopped = 1; break; }
               }
           }
@@ -648,7 +703,7 @@ static double now_sec(void) {
 int main(int argc, char** argv) {
   ensure_tables();
   u64 n = 1000000000ULL;
-  u64 B = DEFAULT_SIEVE_B;
+  u64 B = DEFAULT_SIEVE_B - (DEFAULT_SIEVE_B % 6);   /* multiple of 6 */
   u64 glo = 0;
   double medF = 3.0;
   long nthreads = 0;
@@ -659,7 +714,7 @@ int main(int argc, char** argv) {
       double bytes = kb * 1024;
       u64 r = 64;
       while ((double)(r << 1) <= bytes) r <<= 1;
-      B = r;
+      B = r - (r % 6);                  /* wheel-210: B must be a multiple of 6 */
     }
     else if (!strcmp(argv[i], "--gpu")) useGpu = 1;
     else if (!strcmp(argv[i], "--med-f") && i + 1 < argc) medF = atof(argv[++i]);
@@ -682,8 +737,8 @@ int main(int argc, char** argv) {
     while ((root + 1) <= n / (root + 1)) root++;
     u64* pl = NULL; u64 npl = 0;
     simple_sieve(root, &pl, &npl);
-    u64 segStart = (glo > (u64)30 * B) ? glo - (u64)30 * B : 0;
-    segStart -= segStart % 30;   /* wheel layout requires segLow = 0 (mod 30) */
+    u64 segStart = (glo > (u64)35 * B) ? glo - (u64)35 * B : 0;
+    segStart -= segStart % 210;  /* wheel layout requires segLow = 0 (mod 210) */
     pi = sieve_slice(segStart, glo, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
     free(pl);
     printf("pi([%llu, %llu]) = %llu\n", (unsigned long long)glo, (unsigned long long)n,
@@ -725,7 +780,7 @@ static void fs_resolve_cfg(long* threads, int* useGpu, u64* B, double* medF,
   u64 sb = c && c->sieve_bytes ? c->sieve_bytes : DEFAULT_SIEVE_B;
   u64 r = 64;
   while ((r << 1) <= sb) r <<= 1;
-  *B = r;
+  *B = r - (r % 6);                   /* wheel-210: B must be a multiple of 6 */
   *medF = (c && c->med_factor > 0.0) ? c->med_factor : 3.0;
 }
 
@@ -739,7 +794,7 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
   while ((root + 1) <= n / (root + 1)) root++;
   u64* pl = NULL; u64 npl = 0;
   simple_sieve(root, &pl, &npl);
-  u64 span = (u64)30 * B;
+  u64 span = (u64)35 * B;
   u64 nseg = (n + span - 1) / span;
   u64 slicesz = (u64)((nseg + (u64)nthreads - 1) / (u64)nthreads);
   if (slicesz == 0) slicesz = 1;
@@ -748,6 +803,13 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
   int gpuFellBack = 0;
   u64 gpuTop = n + 1;   /* engine counts candidate values < cap -> include n */
   if (useGpu) {
+    /* wheel-210 branch: the GPU kernels are wheel-30 (different byte grid),
+       so the audited GPU path is disabled here - the exact CPU engine runs
+       instead, keeping the printed value exact. */
+    fprintf(stderr, "GPU disabled on wheel-210 branch - using CPU engine\n");
+    useGpu = 0;
+  }
+  if (useGpu) {
     u64 gb = (gpuTop + GPU_BLOCK_VALS - 1) / GPU_BLOCK_VALS;
     u64* bc = (u64*)calloc((size_t)gb, 8);
     GpuResult r = gpu_sieve(gpuTop, bc, &gsec);
@@ -755,9 +817,9 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
       u64 sum = 0;
       for (u64 i = 0; i < r.nblocks; i++) sum += bc[i];
       u64 mism = 0, aud = 0;
-      if ((u64)30 * B % GPU_BLOCK_VALS != 0) { mism = 1; }
+      if ((u64)35 * B % GPU_BLOCK_VALS != 0) { mism = 1; }
       else {
-        u64 csegs = gpuTop / ((u64)30 * B);
+        u64 csegs = gpuTop / ((u64)35 * B);
         u64 step = (csegs > 512) ? (csegs / 512U) : 1;
         u64 aiList[1024]; u64 nc = 0;
         for (u64 ai = 0; ai < csegs && nc < 1023; ai += step) aiList[nc++] = ai;
@@ -765,8 +827,8 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
           if (nc < 1024) aiList[nc++] = csegs > 0 ? csegs - 1 : 0;
         }
         for (u64 x = 0; x < nc && aud < 512; x++) {
-          u64 segLo = aiList[x] * (u64)30 * B;
-          u64 segHi = segLo + (u64)30 * B;
+          u64 segLo = aiList[x] * (u64)35 * B;
+          u64 segHi = segLo + (u64)35 * B;
           if (segHi > gpuTop) segHi = gpuTop;
           /* CPU audit window uses the same cap convention as the GPU blocks:
              a full segment owns candidates up to segHi+1 (trailing offset-31),
@@ -784,7 +846,7 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
         }
       }
       if (mism == 0) {
-        if (n >= 5) sum += 3; else if (n >= 3) sum += 2; else if (n >= 2) sum += 1;
+        if (n >= 7) sum += 4; else if (n >= 5) sum += 3; else if (n >= 3) sum += 2; else if (n >= 2) sum += 1;
         pi = sum;
         fprintf(stderr, "GPU audit passed (%llu segments sampled) - device: %s, kernel %.3f s\n",
                 (unsigned long long)aud, r.device, r.gpu_secs);
@@ -820,7 +882,8 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
     {
       pi = sieve_slice(0, 0, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
     }
-    if (n >= 5) pi += 3;
+    if (n >= 7) pi += 4;
+    else if (n >= 5) pi += 3;
     else if (n >= 3) pi += 2;
     else if (n >= 2) pi += 1;
   }
@@ -867,8 +930,8 @@ static int64_t fs_generate_core(uint64_t lo, uint64_t hi, fastsieve_prime_cb cb,
   u64* pl = NULL; u64 npl = 0;
   simple_sieve(root, &pl, &npl);
   gen_ctx g; g.cb = cb; g.user = user; g.n = 0;
-  u64 segStart = (lo > (u64)30 * B) ? lo - (u64)30 * B : 0;
-  segStart -= segStart % 30;   /* wheel layout requires segLow = 0 (mod 30) */
+  u64 segStart = (lo > (u64)35 * B) ? lo - (u64)35 * B : 0;
+  segStart -= segStart % 210;  /* wheel layout requires segLow = 0 (mod 210) */
   sieve_slice(segStart, lo, top, B, smallMax, medMax, pl, npl, gen_emit, &g);
   free(pl);
   return g.n;
