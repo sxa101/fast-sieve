@@ -119,10 +119,15 @@ CUDA, RTX 3090):
 
 | n     | ours CPU 1t | ours CPU 12t | primesieve 1t | primesieve 12t | ours GPU (kernel) |
 |-------|------------:|-------------:|--------------:|---------------:|------------------:|
-| 1e9   | 0.21 s      | 0.07 s       | 0.10 s        | 0.02 s         | 0.016 s           |
-| 1e10  | 2.4 s       | 0.50 s       | 1.2 s         | 0.29 s         | 0.16 s            |
+| 1e9   | 0.13 s      | 0.05 s       | 0.10 s        | 0.02 s         | 0.016 s           |
+| 1e10  | 1.6 s       | 0.42 s       | 1.2 s         | 0.29 s         | 0.16 s            |
 | 1e11  | –           | –            | –             | –              | 1.6 s             |
-| 1e12  | 510 s       | 257 s        | 267 s         | 163 s          | 17.9 s            |
+| 1e12  | 429 s       | 218 s        | 267 s         | 163 s          | 17.9 s            |
+
+venus is a shared box (bursty neighbor load, ±20% on wall times); ratios are
+the meaningful signal. CPU numbers include the L1-chunk fix
+([docs/CPU_PERF.md](docs/CPU_PERF.md)); single-thread gap to primesieve is now
+~1.1–1.3× (was ~1.9×), 12-thread at parity or ahead at ≥1e10.
 
 The CUDA kernel is **bit-exact** (audit passes everywhere), and the fixed
 OpenCL kernel is now also bit-exact on the RX 9070 XT (audit passes, no

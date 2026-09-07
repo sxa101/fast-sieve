@@ -87,7 +87,12 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
 /* ------------------------------------------------------------------ */
 #define L1_BYTES        (32u << 10)   /* Zen 3 L1D */
 #define DEFAULT_SIEVE_B (256u << 10)  /* segment bytes (power of two) */
-#define L1_CHUNK        (1u << 18)
+/* Small-prime crossing chunk. MUST be L1-sized: every small sieving prime
+   sweeps the whole chunk once, so the chunk is the per-pass working set.
+   256 KiB here made each pass stream from L2 (~1.9x slower overall than
+   primesieve on the venus box); 32 KiB keeps the passes in L1D and closed
+   most of the gap (docs/CPU_PERF.md). */
+#define L1_CHUNK        (32u << 10)
 #define PRESIEVE_MAX    163           /* multiples of p<=163 presieved */
 /* ------------------------------------------------------------------ */
 /* Wheel-30 crossing tables                                           */
