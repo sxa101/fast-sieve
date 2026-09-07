@@ -131,13 +131,20 @@ static void build_cross_tables(void) {
      loop let a later non-coprime r wipe NEXT210[r] back to the 210 marker,
      so prime_init_state jumped q forward to a non-candidate multiple and
      desynced every crossing for that prime (the historical wheel-210 bug). */
-  for (int r = 0; r < 210; r++) { NEXT210[r] = 210; MIDX210[r] = 255; CNT210[r] = 0; }
+  for (int r = 0; r < 210; r++) { MIDX210[r] = 255; CNT210[r] = 0; }
+  /* NEXT210[q] = the next coprime-to-210 residue >= q (q=209 wraps to 209).
+     Right-to-left sweep; an ascending marker-guard fill would leave
+     NEXT210[q] = 11 for every q (the first coprime's pass wins), making the
+     init bump q BACKWARD below the segment start - the historical bug. */
+  NEXT210[209] = 209;
+  for (int q = 208; q >= 1; q--)
+    NEXT210[q] = (q % 2 && q % 3 && q % 5 && q % 7) ? (u8)q : NEXT210[q + 1];
+  NEXT210[0] = 1;
   for (int r = 0; r < 210; r++) {
     if (r % 2 && r % 3 && r % 5 && r % 7) {
       /* bit index: RES210[0] = 1 is the unstored phantom -> bit 47 of the
          PREVIOUS block; stored residues RES210[1..47] map to bits 0..46 */
       MIDX210[r] = (r == 1) ? 47 : (u8)(KMAP210[r] - 1);
-      for (int q = r; q < 210; q++) if (NEXT210[q] == 210) NEXT210[q] = (u8)r;
     }
   }
   for (int r = 0; r < 210; r++) {
@@ -472,7 +479,7 @@ static u64 cbits_prefix(const u8* s, u64 B, u64 segLow, u64 up)
   if (rel > (u64)35 * B) rel = (u64)35 * B;
   if (rel <= 1) return 0;
   u64 rr = rel % 210;
-  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1 + (rr < 2 ? 1u : 0u);
+  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1;
   if (nbits > B * 8) nbits = B * 8;
   u64 nf = nbits / 64, nb = nbits & 63;
   for (u64 i = 0; i < nf; i++) total += popcnt(w[i]);
@@ -487,12 +494,15 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
   u64 nw = B / 8;
   if (segLow + (u64)35 * B < n) {   /* strictly: every candidate < n */
     for (u64 i = 0; i < nw; i++) total += popcnt(w[i]);
+    /* 210-grid: B is a multiple of 6, NOT of 8 - the tail bytes carry
+       real candidates and must be counted (B%8 = 4 bytes per segment) */
+    for (u64 bb = 8 * nw; bb < B; bb++) total += popcnt((u64)s[bb]);
     return total;
   }
   /* partial segment: number of candidate slots with value < n */
   u64 rel = n - segLow;
   u64 rr = rel % 210;
-  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1 + (rr < 2 ? 1u : 0u);
+  u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1;
   u64 nf = nbits / 64, nb = nbits & 63;
   for (u64 i = 0; i < nf; i++) total += popcnt(w[i]);
   if (nb) total += popcnt(w[nf] & ((1ull << nb) - 1));
