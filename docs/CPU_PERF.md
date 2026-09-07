@@ -1,7 +1,7 @@
 # CPU performance investigation — closing the gap to primesieve
 
-Date: 2026-09-07, venus box (i5-11600, 12 threads, gcc 13 -O3 -march=native).
-Oracle: primesieve 12.16, same compiler. **Caveat: venus is a shared box with
+Date: 2026-09-07, Linux/CUDA host (i5-11600, 12 threads, gcc 13 -O3 -march=native).
+Oracle: primesieve 12.16, same compiler. **Caveat: the host is a shared machine with
 bursty neighbor load (loadavg spikes to 9+); all numbers are min-of-N wall
 times, ratios are trustworthy, absolute values are ~±20%.**
 

@@ -124,7 +124,7 @@ CUDA, RTX 3090):
 | 1e11  | –           | –            | –             | –              | 1.6 s             |
 | 1e12  | 429 s       | 218 s        | 267 s         | 163 s          | 17.9 s            |
 
-venus is a shared box (bursty neighbor load, ±20% on wall times); ratios are
+The Linux benchmark host is shared (bursty neighbor load, ±20% on wall times); ratios are
 the meaningful signal. CPU numbers include the L1-chunk fix
 ([docs/CPU_PERF.md](docs/CPU_PERF.md)); single-thread gap to primesieve is now
 ~1.1–1.3× (was ~1.9×), 12-thread at parity or ahead at ≥1e10.
