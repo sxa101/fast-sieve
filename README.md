@@ -104,14 +104,17 @@ powershell -ExecutionPolicy Bypass .\tests.ps1
 
 ### CPU — Windows dev box (Ryzen 5 5600G, MSVC /O2 /arch:AVX2)
 
-Measured before the L1-chunk fix described below; expect a similar gain on
-re-measurement.
+Rebuilt + re-measured after the L1-chunk fix (best-of-2, 2026-09-07).
 
 | n     | ours 1 core | ours 12 threads | primesieve 1 core | primesieve 12 threads |
 |-------|------------:|----------------:|------------------:|----------------------:|
-| 1e9   | 0.17 s      | 0.05 s          | 0.11 s            | 0.04 s                |
-| 1e10  | 1.9 s       | 0.36 s          | 1.1 s             | 0.25 s                |
-| 1e12  | 290 s       | 52 s            | 167 s             | 31 s                  |
+| 1e9   | 0.14 s      | 0.04 s          | 0.11 s            | 0.03 s                |
+| 1e10  | 1.7 s       | 0.31 s          | 1.0 s             | 0.23 s                |
+| 1e11  | 20 s        | 3.5 s           | 13 s              | 2.5 s                 |
+| 1e12  | 271 s       | 47 s            | 159 s             | 30 s                  |
+
+On this MSVC build the fix pulls single-thread from ~×1.6–2.0 to ~×1.35–1.7
+behind primesieve (×1.36 at 1e9) and 12-thread to ~×1.4–1.6 behind.
 
 ### CPU + GPU — Linux/CUDA reference box (i5-11600, gcc 13; RTX 3090)
 
@@ -128,7 +131,9 @@ chunking bug: the small-prime crossing swept 256 KiB chunks from L2 instead of
 is now ~1.1–1.3× single-thread, and 12 threads are at parity or ahead of
 primesieve at ≥ 1e10, with no code-generation tricks (the primesieve-style
 Duff's-device loop was built, measured and parked — it stopped mattering once
-the working set fit L1). Full analysis, profile and remaining options:
+the working set fit L1). (gcc numbers; the MSVC dev box runs hotter at
+~×1.35–1.7 single-thread / ~×1.4–1.6 at 12 threads. Shared host → min-of-N,
+absolute ±~20%.) Full analysis, profile and remaining options:
 [docs/CPU_PERF.md](docs/CPU_PERF.md).
 
 The CUDA kernel is **bit-exact** (audit passes everywhere), and the fixed
@@ -143,21 +148,24 @@ Design, measurements and the rejected-alternatives log are in
 
 | n     | CPU 12 threads (dev box) | AMD GPU OpenCL (RX 9070 XT) | CPU 12 threads (reference) | CUDA GPU (RTX 3090) |
 |-------|-------------------------:|----------------------------:|---------------------------:|--------------------:|
-| 1e8   | 0.032 s                  | 0.006 s                     | –                          | –                  |
-| 1e9   | 0.052 s                  | 0.044 s                     | 0.07 s                     | 0.016 s            |
-| 1e10  | 0.35 s                   | 0.35 s                      | 0.50 s                     | 0.16 s             |
-| 1e11  | 4.1 s                    | 2.53 s                      | –                          | 1.6 s              |
-| 1e12  | 50.6 s                   | 26.3 s                      | 257 s                      | 17.9 s             |
+| 1e8   | 0.020 s                  | 0.006 s                     | –                          | –                  |
+| 1e9   | 0.048 s                  | 0.044 s                     | 0.05 s                     | 0.016 s            |
+| 1e10  | 0.31 s                   | 0.35 s                      | 0.42 s                     | 0.16 s             |
+| 1e11  | 3.5 s                    | 2.53 s                      | 4.7 s                      | 1.6 s              |
+| 1e12  | 47 s                     | 26.3 s                      | 218 s                      | 17.9 s             |
 
 Takeaways:
-* **CUDA (v3 kernel) is still the fastest**: 1e12 in **17.9 s** (vs 30.6 s for
-  12-thread primesieve, 26.3 s for the AMD GPU, 50.6 s for our CPU on the dev
-  box).
+* **CUDA (v3 kernel) is the fastest thing in this table**: 1e12 in **17.9 s** —
+  ~1.5× faster than the AMD GPU (26.3 s), 1.7× faster than 12-thread
+  primesieve on the same box (30 s), 2.6× faster than our dev-box CPU (47 s).
+* **The AMD GPU now beats both our CPU and 12-thread primesieve on the dev
+  box** at 1e12 (26.3 s vs 47 s / 30 s), which it already did at every smaller
+  size — OpenCL stayed behind the CPU only at 1e10 (0.35 vs 0.31 s).
 * **The OpenCL path on the RX 9070 XT now runs the same v3 phase-split kernel**
   (reciprocal-multiply division, small-prime cooperative loop, large primes one
   per lane): **exact** (audit passes, no fallback, verified up to 1e12) and
-  beats the CPU engine at every measured size — 1e12 kernel **715.5 s → 26.3 s**
-  (≈27×). Design in [docs/GPU_DEVELOPMENT.md §9](docs/GPU_DEVELOPMENT.md),
+  beats the CPU engine from ~1e11 up — 1e12 kernel **715.5 s → 26.3 s** (≈27×).
+  Design in [docs/GPU_DEVELOPMENT.md §9](docs/GPU_DEVELOPMENT.md),
   measurements in [docs/GPU.md](docs/GPU.md).
 * A ROCm/HIP backend (recompiling the CUDA kernel `gpu_cuda.cu` ~verbatim) is a
   future exercise once the AMD card is reachable from Linux; not available on the

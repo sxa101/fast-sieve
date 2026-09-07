@@ -50,13 +50,15 @@ and 6 CTA/SM occupancy.
 
 | n     | CPU 12 threads | primesieve 12t | CUDA GPU (3090) | CUDA GPU (3080 Ti) |
 |-------|---------------:|---------------:|----------------:|-------------------:|
-| 1e9   | 0.07 s         | 0.02 s         | 0.016 s         | 0.017 s            |
-| 1e10  | 0.50 s         | 0.29 s         | 0.16 s          | 0.17 s             |
-| 1e11  | ~4 s           | ~2.6 s         | 1.6 s           | 1.7 s              |
-| 1e12  | 257 s          | 163 s          | **17.9 s**      | 18.2 s             |
+| 1e9   | 0.05 s         | 0.02 s         | 0.016 s         | 0.017 s            |
+| 1e10  | 0.42 s         | 0.40 s         | 0.16 s          | 0.17 s             |
+| 1e11  | 4.7 s          | 10.5 s         | 1.6 s           | 1.7 s              |
+| 1e12  | 218 s          | 163 s          | **17.9 s**      | 18.2 s             |
 
-**The CUDA GPU wins everywhere** - 1e12 in 17.9 s (47x the initial port, 9x
-faster than 12-thread primesieve, 14x faster than our CPU). Bit-exact: full
+(Reference-host CPU/primesieve columns are min-of-N on a shared box, ±~20%;
+CPU column post-L1-chunk-fix.) **The CUDA GPU wins everywhere** - 1e12 in
+17.9 s (47x the initial port, 9x faster than 12-thread primesieve, 12x faster
+than that host's CPU). Bit-exact: full
 audit 0 mismatches, `./tests.sh ./fastsieve --gpu` 24/24, boundary primes exact.
 Full design and rejected alternatives in
 [docs/GPU_DEVELOPMENT.md §9](GPU_DEVELOPMENT.md).
@@ -65,17 +67,19 @@ Full design and rejected alternatives in
 
 Now the **v3 phase-split kernel** (reciprocal-multiply division, small primes
 cooperative / large one-per-lane): exact (audit passes, no fallback - verified
-up to 1e12) and **faster than the CPU engine at every measured size**.
+up to 1e12). CPU columns are the post-L1-chunk-fix dev-box numbers (best-of-2).
 
 | n     | CPU 12 threads | primesieve 12t | GPU kernel (OpenCL, gfx1201) |
 |-------|---------------:|---------------:|-----------------------------:|
-| 1e8   | 0.032 s        | 0.026 s        | 0.006 s                      |
-| 1e9   | 0.052 s        | 0.032 s        | 0.044 s                      |
-| 1e10  | 0.35 s         | 0.234 s        | 0.35 s                       |
-| 1e11  | 4.1 s          | 2.5 s          | 2.53 s                       |
-| 1e12  | 50.6 s         | 30.6 s         | 26.3 s                       |
+| 1e8   | 0.020 s        | 0.012 s        | 0.006 s                      |
+| 1e9   | 0.048 s        | 0.032 s        | 0.044 s                      |
+| 1e10  | 0.31 s         | 0.229 s        | 0.35 s                       |
+| 1e11  | 3.5 s          | 2.49 s         | 2.53 s                       |
+| 1e12  | 47 s           | 30.0 s         | 26.3 s                       |
 
-The 1e12 kernel went **715.5 s -> 26.3 s** when the v1 kernel was replaced by
+The GPU beats the CPU engine from ~1e11 up on this box (the only win-for-CPU
+cell is 1e10, a 0.35 s vs 0.31 s photo-finish). The 1e12 kernel went
+**715.5 s -> 26.3 s** when the v1 kernel was replaced by
 the v3 phase split (≈27x); CUDA on the 3090 is still 1.5x faster (17.9 s).
 For reference, v1 (naive) timings were: 1e9 0.063, 1e10 1.11, 1e11 26.2 s.
 
