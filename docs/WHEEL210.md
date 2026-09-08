@@ -13,13 +13,53 @@ loop is redesigned or the experiment is abandoned.
 * `tests.sh`: 24/24 — pi(n) exact for n = 1e2..1e12 at -t1 AND -t12, plus
   the boundary primes 786431² = 618473717761 (23688293324) and
   786433² = 618476863489 (23688409284).
-* `api_test`: 62/62 (pi sweep incl. 1e12, count/generate/isprime/nth_prime,
-  error contracts; GPU path intentionally disabled on this branch — kernels
-  are wheel-30).
+* `api_test`: 62/62, re-run on a synchronously built binary (the first
+  post-fix relaunch raced `gcc -o api_test` against the api_test exec —
+  process-hazard note, see below).
 * `--lo` interval spot checks vs `primesieve lo hi`: windows starting and
   ending exactly on segment boundaries (9174900·k), the countLo-on-boundary
   case [9174900, 9274900], windows in the pend band (6.2e11..1e12), and
   multi-segment emit diffs vs `primesieve -p` (byte-exact prime lists).
+* Above-1e12 spot windows (critical-review follow-up): [1.2e12, +2e8],
+  [1.5e12, +2e8], [2e13, +2e8] and [8e15−2e8, 8e15] all exact. The 8e15
+  window exercises the extremes: root = 89.4M, pend entries waiting
+  thousands of segments, bucket windows of ~2000 segments.
+
+## CRITICAL: main (wheel-30) is wrong above n ≈ 2e12
+
+The same pend one-early bug exists on main — its first-multiple offset is
+< 7p (quotient bump ≤ 6), so pend only engages for p > 30B/7 ≈ 1.12M,
+i.e. n ≳ 1.26e12, just above main's verified ceiling of 1e12. Confirmed
+empirically against primesieve (window [n, n+2e8], main @5823076):
+
+| n     | main error | main + pend reorder |
+|-------|-----------:|--------------------:|
+| 1.5e12 | 0         | 0                   |
+| 2e12  | +678       | 0                   |
+| 3e12  | +6,431     | 0                   |
+| 5e12  | +24,157    | 0                   |
+| 1e13  | +70,048    | 0                   |
+| 2e13  | +129,072   | 0                   |
+| 8e15  | +5,894,756 | (not run)           |
+
+The three-line fix (test `i < B` before decrementing, decrement only when
+not pushed — commit c6b2c7f) applied to a copy of main makes 2e12/2e13
+exact and regression-clean at pi(1e11) and [618.4G, 618.5G]. **Main should
+take this fix**; every pi/count/generate/nth_prime answer above ≈2e12 from
+the current main is suspect, and the API advertises FASTSIEVE_MAX_N = 8e15.
+
+Error-magnitude note: the naive "every multiple of every pended prime is
+missed" model overpredicts ~20x — a composite p×q with p pended-broken is
+usually still cleared by a co-factor ≤ root from a correct chain; the
+visible residue comes from multiples whose only ≤root factors are
+themselves broken (semiprime-ish p·q with q > root).
+
+Process note (why the first post-fix api_test result needed a re-run): the
+relaunch command built api_test and exec'd it from background jobs started
+in the same shell line — a build/exec race. The result happened to be
+valid (the stale 06:51 binary would have failed pi(1e12) -t12 by ~+239M
+via the then-unfixed bucket bug, so a 62/62 PASS proves the new binary
+ran), but the race was real; the clean re-run above settles it.
 
 ## The bugs that finished it (each verified by oracle diff)
 
@@ -115,8 +155,9 @@ lead). Measured micro-findings:
    also explains the poor t12 scaling (2× at 12 threads).
 3. Account for the ~40% out-of-timer cycles before trusting any micro
    optimization.
-4. Port the pend-migration reordering (bug 6) to main — latent there
-   above n ≈ 1.3e12.
+4. Port the pend-migration reordering (bug 6) to main — **confirmed wrong
+   there above n ≈ 2e12, see the section above**; the three-line fix is
+   verified (main + fix exact at 2e12/2e13).
 5. GPU: kernels are wheel-30; a 210 port is deliberate follow-up work.
 
 ## Debug tooling that earned its keep (in /tmp, recreate if lost)
