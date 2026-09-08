@@ -476,9 +476,15 @@ static u64 cbits_prefix(const u8* s, u64 B, u64 segLow, u64 up)
   const u64* w = (const u64*)s;
   if (up <= segLow) return 0;
   u64 rel = up - segLow;                 /* up > segLow */
-  if (rel > (u64)35 * B) rel = (u64)35 * B;
   if (rel <= 1) return 0;
   u64 rr = rel % 210;
+  /* bit prefix G(rel) = 48k + CNT210[rr] - 1 counts every stored candidate
+     with value < segLow+rel (k full 210-blocks = 48 bits each, then the
+     residues < rr of block k; the -1 offsets CNT210 counting the unstored
+     residue 1, which for rr=0/1 lands on the previous block's bit 47).
+     NEVER clamp rel to 35B first: for up >= segLow+35B+2 the trailing
+     bit (the phantom, value segLow+35B+1) is < up and must be counted;
+     clamping nbits to B*8 handles values past the segment instead. */
   u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1;
   if (nbits > B * 8) nbits = B * 8;
   u64 nf = nbits / 64, nb = nbits & 63;
@@ -492,7 +498,11 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
   u64 total = 0;
   const u64* w = (const u64*)s;
   u64 nw = B / 8;
-  if (segLow + (u64)35 * B < n) {   /* strictly: every candidate < n */
+  /* full branch: every stored candidate (including the trailing bit, the
+     phantom with value segLow+35B+1) is < n; the +1 matters when n lands
+     exactly on the phantom's value (a thread slice cap at a segment edge):
+     counting all bits then would include a value == n */
+  if (segLow + (u64)35 * B + 1 < n) {
     for (u64 i = 0; i < nw; i++) total += popcnt(w[i]);
     /* 210-grid: B is a multiple of 6, NOT of 8 - the tail bytes carry
        real candidates and must be counted (B%8 = 4 bytes per segment) */
@@ -501,8 +511,10 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
   }
   /* partial segment: number of candidate slots with value < n */
   u64 rel = n - segLow;
+  if (rel <= 1) return 0;    /* n == segLow(+1): u64 wrap in nbits below */
   u64 rr = rel % 210;
   u64 nbits = (rel / 210) * 48 + (u64)CNT210[rr] - 1;
+  if (nbits > B * 8) nbits = B * 8;
   u64 nf = nbits / 64, nb = nbits & 63;
   for (u64 i = 0; i < nf; i++) total += popcnt(w[i]);
   if (nb) total += popcnt(w[nf] & ((1ull << nb) - 1));
@@ -532,7 +544,6 @@ static void prime_init_state(u64 p, u64 low, u32* outI, u8* outK, u8* outT)
 static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 medMax,
                        const u64* pl, u64 npl, fs_emit_cb emit, void* emitCtx)
 {
-  u64 bps = B / 6;                             /* 210-blocks per segment */
   u8* sieve = (u8*)malloc((size_t)B);
   if (!sieve) { fprintf(stderr, "oom\n"); exit(1); }
   State st; memset(&st, 0, sizeof(st));
@@ -562,21 +573,30 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
       else if (p <= medMax)
         s_med_push(&st, i0, k0, t0, p);
       else {
-        /* bucketized: first multiple may lie several segments ahead */
-        u64 seg = i0 / bps;
+        /* bucketized: first multiple may lie several segments ahead.
+           i0/nxt are BYTE indices: the bucket arithmetic splits on B
+           (bytes per segment) - NOT on bps (blocks per segment).  In the
+           wheel-30 layout blocks == bytes, so main divides by "B" via a
+           shift; the 210 port must keep dividing by B (a block is 6 bytes). */
+        u64 seg = i0 / B;
         u32 nd = s_node_new(&st);
         st.nodes[nd].sp = (u32)(p / 210);
-        st.nodes[nd].i  = i0 % bps;
+        st.nodes[nd].i  = i0 % B;
         st.nodes[nd].k  = k0;
         st.nodes[nd].t  = t0;
         s_big_relink(&st, nd, seg);
       }
     }
-    /* migrate pending primes whose first multiple arrived */
+    /* migrate pending primes whose first multiple arrived.
+       pend.i is in the coordinates of the segment where the prime was
+       ADDED: test BEFORE decrementing.  Testing after (i -= B first)
+       pushes the first crossing one segment early - the whole chain then
+       lands at value - span (wheel-30 never hit this below 1e12 because
+       its first-multiple offset 7p < 30B for p <= 1.12M, but the 210
+       wheel's offset can reach 11p > 35B for p > 833k). */
     if (st.npend) {
       u64 w = 0;
       for (u64 x = 0; x < st.npend; x++) {
-        if (st.pend[x].i >= B) st.pend[x].i -= (u32)B;
         u64 pv = 210ull * st.pend[x].sp + (u64)RES210[st.pend[x].k];
         if (st.pend[x].i < B) {
           if (pv <= smallMax)
@@ -584,8 +604,10 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
           else
             s_med_push(&st, st.pend[x].i, st.pend[x].k, st.pend[x].t, pv);
         }
-        else
+        else {
+          st.pend[x].i -= (u32)B;
           st.pend[w++] = st.pend[x];
+        }
       }
       st.npend = w;
     }
@@ -611,8 +633,10 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         sieve[i] &= BM210[k][t];
         u64 nxt = i + (u64)CV210[k][t] * sp + CB210[k][t];
         t = tinc(t);
-        u64 seg = nxt / bps;
-        u64 ii  = nxt % bps;
+        /* nxt is a byte distance from this segment's byte i: split on B
+           (bytes/segment), never on bps (blocks/segment, = B/6) */
+        u64 seg = nxt / B;
+        u64 ii  = nxt % B;
         st.nodes[nd].i = (u32)ii;
         st.nodes[nd].t = t;
         s_big_relink(&st, nd, seg);
@@ -670,8 +694,9 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
             for (int b = 0; b < 8; b++)
               if (byte & (1u << b)) {
                 u64 g = 48 * blk + sub + (u64)b;
-                u64 v = 210 * (g / 48) + ((g % 48) == 47 ? 211ULL
-                                                         : (u64)RES210[1 + g % 48]);
+                /* g is SEGMENT-relative: values need the segment base */
+                u64 v = low + 210 * (g / 48) + ((g % 48) == 47 ? 211ULL
+                                                          : (u64)RES210[1 + g % 48]);
                 if (v >= from && v < cap && emit(v, emitCtx)) { stopped = 1; break; }
               }
           }
