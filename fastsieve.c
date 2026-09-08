@@ -109,8 +109,9 @@ static u8  MIDX210[210];      /* coprime r -> bit index m within 6-byte block (4
 static u8  CNT210[210];       /* # coprime residues < r (incl. 1) */
 static u8  NEXT210[210];      /* next coprime residue >= r */
 static u8  KMAP210[210];      /* coprime residue -> class index 0..47 */
-static u16 CV210[48][48];     /* [class][state] byte step = CV*sp + CB; CV = 6*dq */
-static u16 CB210[48][48];     /* byte-index remainder of the step */
+static u32 ST210[48][48];     /* [class][state] packed step: low16 = CB, high16 = CV (6*dq) */
+static u32 ST2[48][96];       /* doubled rows: states t..t+47 contiguous from any t */
+static u8  BM2[48][96];       /* doubled masks, same layout */
 static u8  BM210[48][48];     /* AND mask clearing the current multiple */
 static u8  PRIMEBITS210[6];   /* true primes in block 0 of the first segment */
 
@@ -172,10 +173,16 @@ static void build_cross_tables(void) {
         fprintf(stderr, "wheel-210: bad step k=%d t=%d cb=%lld\n", k, t, cb);
         exit(1);
       }
-      CV210[k][t] = (u16)(6 * dq); CB210[k][t] = (u16)cb;
+      ST210[k][t] = (u32)((u16)cb) | ((u32)(u16)(6 * dq) << 16);
       BM210[k][t] = (u8)~(1u << (MIDX210[(rk * (long long)tq) % 210] & 7));
     }
   }
+  /* doubled rows for the rotated crossing path (build AFTER BM210) */
+  for (int k = 0; k < 48; k++)
+    for (int t = 0; t < 48; t++) {
+      ST2[k][t] = ST2[k][t + 48] = ST210[k][t];
+      BM2[k][t] = BM2[k][t + 48] = BM210[k][t];
+    }
   /* block 0 of the very first segment: true primes among the candidates */
   for (int m = 0; m < 48; m++) {
     u64 v = (m == 47) ? 211ULL : (u64)RES210[m + 1];
@@ -276,7 +283,7 @@ typedef struct { u32 sp; u32 i; u8 k; u8 t; } SPF;
 typedef struct { u32 sp; u32 i; u8 k; u8 t; u32 next; } SPN;
 
 /* stage index after the current one (t in 0..7) */
-static inline u8 tinc(u8 t) { return (u8)((t + 1) % 48U); }
+static inline u8 tinc(u8 t) { u8 tt = (u8)(t + 1); return tt == 48 ? 0 : tt; }
 
 /* ------------------------------------------------------------------ */
 /* Crossing (flat class)                                               */
@@ -297,23 +304,59 @@ static void cross_flat(u8* s, u64 B, SPF* P, u64 np)
     u8 k = P[n].k;
     u8 t = P[n].t;
     u8 exT = t;
-    const u16* cv = CV210[k];   /* step byte-index multiplier (6*dq, u16) */
-    const u16* cb = CB210[k];  /* step byte-index offset      */
+    u64 p = 210ull * sp + RES210[k];
+    if (8 * B / p >= 48) {
+      /* rotated fast path: doubled rows make this prime's 48-state cycle a
+         contiguous window, so a full cycle starts and ends at state t and
+         the per-cycle offsets hoist out of the store loop */
+      const u32* stp = ST2[k] + t;
+      const u8* bit = BM2[k] + t;
+      u32 off[48];
+      u32 acc = 0;
+      for (int j = 0; j < 48; j++) {
+        off[j] = acc;
+        acc += (u32)(stp[j] >> 16) * sp + (stp[j] & 0xffff);
+      }
+      u32 stride = acc;
+      if (stride < B) {
+        while (i + stride < B) {
+          for (u32 j = 0; j < 48; j++) s[i + off[j]] &= bit[j];
+          i += stride;
+        }
+        if (i >= B) { P[n].i = (u32)(i - B); P[n].t = t; continue; }
+      }
+      for (u32 j = 0;; j++) {
+        if (j == 48) j = 0;
+        if (i >= B) { P[n].i = (u32)(i - B); P[n].t = (u8)((t + j) % 48U); break; }
+        s[i] &= bit[j];
+        i += (u32)(stp[j] >> 16) * sp + (stp[j] & 0xffff);
+      }
+      continue;
+    }
+    const u32* stp = ST210[k];  /* packed step: cb = stp&0xffff, cv = stp>>16 */
     const u8* bit = BM210[k];
 
     for (;;) {                                   /* per 48-step cycle */
       u8 st = t;
       for (int sb = 0; sb < 6; sb++) {
-        u32 st1 = (u32)(st + 1) % 48, st2 = (st + 2) % 48, st3 = (st + 3) % 48;
-        u32 st4 = (st + 4) % 48, st5 = (st + 5) % 48, st6 = (st + 6) % 48, st7 = (st + 7) % 48;
-        u32 o1 = (u32)cv[st]  * sp + cb[st];
-        u32 o2 = o1 + (u32)cv[st1] * sp + cb[st1];
-        u32 o3 = o2 + (u32)cv[st2] * sp + cb[st2];
-        u32 o4 = o3 + (u32)cv[st3] * sp + cb[st3];
-        u32 o5 = o4 + (u32)cv[st4] * sp + cb[st4];
-        u32 o6 = o5 + (u32)cv[st5] * sp + cb[st5];
-        u32 o7 = o6 + (u32)cv[st6] * sp + cb[st6];
-        u32 stride = o7 + (u32)cv[st7] * sp + cb[st7];
+        /* st+j <= 54: one conditional subtract, no %48 division sequence */
+        u32 st1 = st + 1; if (st1 >= 48) st1 -= 48;
+        u32 st2 = st + 2; if (st2 >= 48) st2 -= 48;
+        u32 st3 = st + 3; if (st3 >= 48) st3 -= 48;
+        u32 st4 = st + 4; if (st4 >= 48) st4 -= 48;
+        u32 st5 = st + 5; if (st5 >= 48) st5 -= 48;
+        u32 st6 = st + 6; if (st6 >= 48) st6 -= 48;
+        u32 st7 = st + 7; if (st7 >= 48) st7 -= 48;
+        u32 c0 = stp[st],  c1 = stp[st1], c2 = stp[st2], c3 = stp[st3];
+        u32 c4 = stp[st4], c5 = stp[st5], c6 = stp[st6], c7 = stp[st7];
+        u32 o1 = (u32)(c0 >> 16) * sp + (c0 & 0xffff);
+        u32 o2 = o1 + (u32)(c1 >> 16) * sp + (c1 & 0xffff);
+        u32 o3 = o2 + (u32)(c2 >> 16) * sp + (c2 & 0xffff);
+        u32 o4 = o3 + (u32)(c3 >> 16) * sp + (c3 & 0xffff);
+        u32 o5 = o4 + (u32)(c4 >> 16) * sp + (c4 & 0xffff);
+        u32 o6 = o5 + (u32)(c5 >> 16) * sp + (c5 & 0xffff);
+        u32 o7 = o6 + (u32)(c6 >> 16) * sp + (c6 & 0xffff);
+        u32 stride = o7 + (u32)(c7 >> 16) * sp + (c7 & 0xffff);
         if (i + o7 >= B) { t = (u8)st; goto tail; }
         s[i]      &= bit[st];
         s[i + o1] &= bit[st1];
@@ -324,7 +367,7 @@ static void cross_flat(u8* s, u64 B, SPF* P, u64 np)
         s[i + o6] &= bit[st6];
         s[i + o7] &= bit[st7];
         i += stride;
-        st = (u8)((st + 8) % 48);
+        st = (u8)(st + 8); if (st >= 48) st = (u8)(st - 48);
         if (i >= B) { i -= B; exT = st; goto done_flat; }
       }
       t = st;                                    /* full cycle: t restored */
@@ -335,7 +378,7 @@ static void cross_flat(u8* s, u64 B, SPF* P, u64 np)
     for (;;) {
       if (i >= B) { i -= B; exT = t; goto done_flat; }
       s[i] &= bit[t];
-      i += (u32)cv[t] * sp + cb[t];
+      { u32 c = stp[t]; i += (u32)(c >> 16) * sp + (c & 0xffff); }
       t = tinc(t);
     }
     done_flat:
@@ -631,8 +674,9 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         u8  k  = st.nodes[nd].k;
         u8  t  = st.nodes[nd].t;
         sieve[i] &= BM210[k][t];
-        u64 nxt = i + (u64)CV210[k][t] * sp + CB210[k][t];
-        t = tinc(t);
+        { u32 c = ST210[k][t];
+          u64 nxt = i + (u64)(u32)(c >> 16) * sp + (c & 0xffff);
+          t = tinc(t);
         /* nxt is a byte distance from this segment's byte i: split on B
            (bytes/segment), never on bps (blocks/segment, = B/6) */
         u64 seg = nxt / B;
@@ -640,6 +684,7 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         st.nodes[nd].i = (u32)ii;
         st.nodes[nd].t = t;
         s_big_relink(&st, nd, seg);
+        continue; }
       }
     }
     /* very first segment (low == 0): restore true small primes */

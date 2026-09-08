@@ -108,57 +108,62 @@ Why the old session saw none of this: its verified range stopped at 1e9
 single-thread (no buckets, no pend, no 1e12), and the t12 spot checks at
 1e6/1e7 predated the last commit's code.
 
-## Benchmarks (honest numbers; shared host, min-of-N)
+## Bottleneck hunt (2026-09-08, second session)
 
-Same host and compiler as docs/CPU_PERF.md (i5-11600, gcc 13 -O3
--march=native); wheel-30 = main @5823076 from a worktree. Seconds, best of
-3 / 2 / 1 (1e9–1e10 / 1e11 / 1e12):
+Twin rdtsc instrumentation of both engines (same session, same clock)
+isolated the gap to the SMALL-prime crossing: ~5.6 cycles/crossing vs
+wheel-30's ~1.9. Disassembly showed why: wheel-30's 8-state cycle aligns
+with its 8-store batch, so all offset/state math hoists out of the store
+loop; the 210 wheel's 48-state cycle forced seven `%48` magic-number
+division sequences plus the full offset chain to be recomputed for every
+8 stores, with register spills.
+
+Three changes landed (all verified against the full gate):
+
+1. Branchless state advance (`tinc`, sub-batch `st+8`).
+2. Packed per-state step table `ST210[k][t]` (u32: low16 = CB, high16 =
+   CV) — one load per state instead of two arrays.
+3. **Rotated fast path**: doubled rows `ST2/BM2[k][t..t+47]` make a full
+   48-state cycle a contiguous window from ANY starting state t; a full
+   cycle starts and ends at state t, so the whole offset vector hoists
+   out of the store loop — the 210 analogue of wheel-30's aligned cycle.
+
+Result (min-of-N, same-host): the gap narrowed from ~2.0× to 1.22–1.45×:
 
 | n    | t  | fs210  | fs30  | primesieve | 210/30 | 210/ps |
 |------|----|-------:|------:|-----------:|-------:|-------:|
-| 1e9  | 1  | 0.324 | 0.154 | 0.098      | 2.10   | 3.31   |
-| 1e9  | 12 | 0.073 | 0.036 | 0.022      | 2.03   | 3.32   |
-| 1e10 | 1  | 3.87  | 1.93  | 1.24       | 2.01   | 3.12   |
-| 1e10 | 12 | 0.66  | 0.36  | 0.28       | 1.81   | 2.35   |
-| 1e11 | 1  | 46.5  | 26.9  | 18.6       | 1.73   | 2.50   |
-| 1e11 | 12 | 27.2  | 14.9  | 12.4       | 1.83   | 2.19   |
-| 1e12 | 1  | 706.7 | 416.1 | 251.1      | 1.70   | 2.81   |
-| 1e12 | 12 | 347.5 | 216.5 | 162.4      | 1.60   | 2.14   |
+| 1e9  | 1  | 0.224 | 0.155 | 0.099      | 1.45   | 2.26   |
+| 1e9  | 12 | 0.048 | 0.037 | 0.022      | 1.30   | 2.18   |
+| 1e10 | 1  | 2.77  | 1.93  | 1.24       | 1.43   | 2.23   |
+| 1e10 | 12 | 0.458 | 0.362 | 0.317      | 1.27   | 1.44   |
+| 1e11 | 1  | 41.9  | 30.0  | 16.9       | 1.40   | 2.47   |
+| 1e11 | 12 | 17.9  | 13.7  | 12.7       | 1.30   | 1.41   |
+| 1e12 | 1  | 535.8 | 415.2 | 254.8      | 1.29   | 2.10   |
+| 1e12 | 12 | 255.5 | 209.0 | 156.3      | 1.22   | 1.63   |
 
-The −14% crossing cut (6/7 wheel ratio) did NOT materialize: per segment
-both grids store the same 2.097M candidate bits, so the 210 engine does
-0.857× the segments but pays ~2.34× per segment → net ~2× slower.
+Measured micro-findings:
 
-## Where the 2.3×/segment goes (rdtsc phase profile, 1e10 t1)
-
-Phase shares of measured cycles are the same shape as wheel-30
-(small 63%, medium 32%, pre-sieve 4%, count 0.5%), but ~40% of total
-cycles fall outside the phase timers (add/pend/loop overhead — itself a
-lead). Measured micro-findings:
-
-* `tinc`'s `% 48` and the sub-batch `(st+8) % 48` → branchless: only
-  +2.5% (tried, not the bottleneck; left as-is since `% 48` documents the
-  wheel invariant).
-* Prime suspects (unproven): the 48-entry u16 table rows are 240 B/prime
-  vs wheel-30's 8-entry rows that fit a register (gcc hoists a whole row;
-  the 210 loop streams L2 per store), and the 16 pre-sieve tiles total
-  ~466 KB vs wheel-30's ~78 KB (L2- vs L1-resident).
+* `%48` → branchless alone: only −14% (the division sequences matter but
+  are not the whole story; the hoisting is).
+* The rotated path is a win for primes with ≥ ~48 multiples per call; the
+  legacy sub-batch path (with cmov indices + packed tables) is kept for
+  the rest.
+* The med class improved 1.59× → ~1.25×; small crossing 2.5× → ~1.66×.
 
 ## Follow-up leads (ordered)
 
-1. Crossing-loop redesign for the 48-state tables: per-prime packed rows,
-   or revive the parked Duff generator (`tools/gen_wheel_duff.py`,
-   `wheel_duff.h`) — immediates should pay far more here than the 5% they
-   gave on wheel-30, because table pressure is the binding constraint.
-2. Migrate pend primes into the BUCKET lists, not med (they are p > medMax
-   by construction; med makes them sweep every segment whole-range) —
-   also explains the poor t12 scaling (2× at 12 threads).
-3. Account for the ~40% out-of-timer cycles before trusting any micro
-   optimization.
-4. Port the pend-migration reordering (bug 6) to main — **confirmed wrong
+1. **Per-segment offset reuse** (attempted, reverted): the per-call
+   `off[48]` build (~200 cycles) still taxes low-multiple primes.  The
+   plan — build once per prime per SEGMENT, let mid-segment chunks
+   overshoot into the next chunk (AND is idempotent), serial-tail only the
+   last chunk — has an UNRESOLVED carried-state bug: the (byte, state)
+   pair desyncs at segment boundaries (probe: byte ≡ 1 mod 6 carried with
+   state 0, which requires byte ≡ 5).  Needs a single-prime cycle-exact
+   simulator before re-attempting; the rest of the design was sound.
+2. Port the pend-migration reordering (bug 6) to main — **confirmed wrong
    there above n ≈ 2e12, see the section above**; the three-line fix is
    verified (main + fix exact at 2e12/2e13).
-5. GPU: kernels are wheel-30; a 210 port is deliberate follow-up work.
+3. GPU: kernels are wheel-30; a 210 port is deliberate follow-up work.
 
 ## Debug tooling that earned its keep (in /tmp, recreate if lost)
 
