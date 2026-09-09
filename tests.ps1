@@ -26,8 +26,8 @@ $cases = @(
 )
 
 function Run-Case($n, $argz) {
-  if ($env:TESTDBG) { Write-Host ("DBG invoking: {0} {1} {2}" -f $tool, $argz, $n) }
-  $o = & $tool @argsLine $n 2>$null | Select-String -Pattern '^pi\('
+  if ($env:TESTDBG) { Write-Host ("DBG invoking: {0} {1} {2}" -f $tool, ($argz -join ' '), $n) }
+  $o = & $tool @argz $n 2>$null | Select-String -Pattern '^pi\('
   if (-not $o) { return $null }
   return [uint64]([regex]::Match($o.Line, '^pi\(\d+\) = (\d+)').Groups[1].Value)
 }
@@ -46,6 +46,24 @@ foreach ($c in $cases) {
     if ($got -eq $c.e) { Write-Host ("PASS {0,-15} {1}  = {2}" -f $n, $mode, $got) -ForegroundColor Green }
     else { Write-Host ("FAIL {0,-15} {1}  got {2} want {3}" -f $n, $mode, $got, $c.e) -ForegroundColor Red; $fail++ }
   }
+}
+# high-n pend-regression windows.  The pend-migration ordering bug made
+# pi() wrong above ~2e12 (first-multiple offset can exceed one segment for
+# p > ~1.1M); the pi() sweep above tops out at 1e12 and cannot see it.
+# Windows sieve a slice around [lo, hi] and are fast (~seconds).  Oracle
+# values are primesieve-verified.
+$winCases = @(
+  @{ lo = 2000000000000;  hi = 2000200000000;   e = [uint64]7061729 },
+  @{ lo = 3000000000000;  hi = 3000200000000;   e = [uint64]6962573 },
+  @{ lo = 10000000000000; hi = 10000010000000;  e = [uint64]334312 },
+  @{ lo = 20000000000000; hi = 20002000000000;  e = [uint64]65307881 }
+)
+foreach ($c in $winCases) {
+  $o = & $tool --lo $c.lo $c.hi 2>$null | Select-String -Pattern '^pi\(\[' | Select-Object -First 1
+  if (-not $o) { Write-Host ("FAIL win [{0},{1}]  (no output / crashed)" -f $c.lo, $c.hi) -ForegroundColor Red; $fail++; continue }
+  $g = [uint64]([regex]::Match($o.Line, '= (\d+)').Groups[1].Value)
+  if ($g -eq $c.e) { Write-Host ("PASS win [{0},{1}]  = {2}" -f $c.lo, $c.hi, $g) -ForegroundColor Green }
+  else { Write-Host ("FAIL win [{0},{1}]  got {2} want {3}" -f $c.lo, $c.hi, $g, $c.e) -ForegroundColor Red; $fail++ }
 }
 # differential vs reference primesieve if available
 $ref = Get-Command primesieve -ErrorAction SilentlyContinue

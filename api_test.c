@@ -70,6 +70,9 @@ int main(void) {
   check("count(13,13)",           fastsieve_count(13, 13, &gpu), 1);
   check("count(14,16)",           fastsieve_count(14, 16, &gpu), 0);
   check("count(p^2,p^2) gpu",     fastsieve_count(618473717761ULL, 618473717761ULL, &gpu), 0);
+  /* pend-regression windows: pend-migration bug made counts wrong above ~2e12 */
+  check("count(2e12,2e12+2e8)",   fastsieve_count(2000000000000ULL, 2000200000000ULL, NULL), 7061729);
+  check("count(1e13,1e13+1e7)",   fastsieve_count(10000000000000ULL, 10000010000000ULL, NULL), 334312);
 
   /* ---- isprime ---- */
   check("isprime(2)",             fastsieve_isprime(2, NULL), 1);
