@@ -533,7 +533,6 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
     if (st.npend) {
       u64 w = 0;
       for (u64 x = 0; x < st.npend; x++) {
-        if (st.pend[x].i >= B) st.pend[x].i -= (u32)B;
         u64 pv = 30ull * st.pend[x].sp + (u64)(OFFB[st.pend[x].k] % 30);
         if (st.pend[x].i < B) {
           if (pv <= smallMax)
@@ -541,8 +540,10 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
           else
             s_med_push(&st, st.pend[x].i, st.pend[x].k, st.pend[x].t, pv);
         }
-        else
+        else {
+          st.pend[x].i -= (u32)B;
           st.pend[w++] = st.pend[x];
+        }
       }
       st.npend = w;
     }
