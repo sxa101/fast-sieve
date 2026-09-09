@@ -437,7 +437,11 @@ static u64 cbits_prefix(const u8* s, u64 B, u64 segLow, u64 up)
   const u64* w = (const u64*)s;
   if (up <= segLow) return 0;
   u64 rel = up - segLow;                 /* up > segLow */
-  if (rel > (u64)30 * B) rel = (u64)30 * B;
+  /* NEVER clamp rel to 30B first: for up >= segLow+30B+2 the trailing bit
+     (the phantom, value segLow+30B+1, residue 1 of the next block) is < up
+     and must be counted; clamping the resulting bit count to 8B handles
+     values past the segment instead (off-by-one family: an interval whose
+     countLo/cap sits on a segment edge dropped/miscounted the phantom). */
   if (rel <= 1) return 0;
   u64 nbits = (rel / 30) * 8 + (u64)CUNIT[rel % 30];
   if (nbits) nbits -= 1;                 /* candidate "1" is not in the array */
@@ -453,12 +457,17 @@ static u64 count_segment(const u8* s, u64 B, u64 n, u64 segLow)
   u64 total = 0;
   const u64* w = (const u64*)s;
   u64 nw = B / 8;
-  if (segLow + (u64)30 * B < n) {   /* strictly: every candidate < n */
+  /* full branch: every stored candidate (including the trailing phantom,
+     value segLow+30B+1) is < n; the +1 matters when n lands exactly on the
+     phantom's value (a cap at a segment edge): counting all bits then
+     would include a value == n. */
+  if (segLow + (u64)30 * B + 1 < n) {
     for (u64 i = 0; i < nw; i++) total += popcnt(w[i]);
     return total;
   }
   /* partial segment: number of candidate slots with value < n */
   u64 rel = n - segLow;
+  if (rel <= 1) return 0;      /* rel == 1: CUNIT[1] - 1 wraps in u64 */
   u64 nbits = (rel / 30) * 8 + (u64)CUNIT[rel % 30];
   if (nbits) nbits -= 1;                 /* the candidate "1" is not in the array */
   u64 nf = nbits / 64, nb = nbits & 63;
@@ -687,6 +696,11 @@ int main(int argc, char** argv) {
     segStart -= segStart % 30;   /* wheel layout requires segLow = 0 (mod 30) */
     pi = sieve_slice(segStart, glo, n + 1, B, smallMax, medMax, pl, npl, 0, 0);
     free(pl);
+    /* primes 2,3,5 are outside the wheel-30 grid (7 is in-band): the slice
+       only counts candidates >= 7, so add them back when in [glo, n]. */
+    if (glo <= 2 && n >= 2) pi++;
+    if (glo <= 3 && n >= 3) pi++;
+    if (glo <= 5 && n >= 5) pi++;
     printf("pi([%llu, %llu]) = %llu\n", (unsigned long long)glo, (unsigned long long)n,
            (unsigned long long)pi);
     printf("Seconds: %.3f\n", now_sec() - t0);
