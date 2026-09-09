@@ -809,6 +809,9 @@ static u64 fs_pi_core(u64 n, long nthreads, int useGpu, u64 B, double medF, doub
                 (unsigned long long)mism);
       }
     } else {
+      /* No usable OpenCL device (e.g. a CI runner).  r.ok == 0 means the GPU
+         produced nothing, so flag the CPU fallback or pi stays 0 below. */
+      gpuFellBack = 1;
       fprintf(stderr, "GPU unavailable - falling back to CPU\n");
     }
     free(bc);
