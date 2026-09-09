@@ -70,9 +70,15 @@ int main(void) {
   check("count(13,13)",           fastsieve_count(13, 13, &gpu), 1);
   check("count(14,16)",           fastsieve_count(14, 16, &gpu), 0);
   check("count(p^2,p^2) gpu",     fastsieve_count(618473717761ULL, 618473717761ULL, &gpu), 0);
-  /* pend-regression windows: pend-migration bug made counts wrong above ~2e12 */
+  /* regression windows the full-range pi sweep cannot see:
+     * pend migration bug made counts wrong above ~2e12;
+     * countLo/cap on a segment edge dropped the phantom candidate
+       (repro [9174900,9274900]; 7864320 = 30*262144 is the span). */
   check("count(2e12,2e12+2e8)",   fastsieve_count(2000000000000ULL, 2000200000000ULL, NULL), 7061729);
   check("count(1e13,1e13+1e7)",   fastsieve_count(10000000000000ULL, 10000010000000ULL, NULL), 334312);
+  check("count(9174900,9274900)", fastsieve_count(9174900, 9274900, NULL), 6287);
+  check("count(7864320,8864320)", fastsieve_count(7864320, 8864320, NULL), 62736);
+  check("count(7864320,7864321)", fastsieve_count(7864320, 7864321, NULL), 0);
 
   /* ---- isprime ---- */
   check("isprime(2)",             fastsieve_isprime(2, NULL), 1);
