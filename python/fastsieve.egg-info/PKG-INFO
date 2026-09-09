@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: fastsieve
-Version: 1.0.0
-Summary: Python bindings for the fastsieve prime-counting engine
-Author: sxa101
-Requires-Python: >=3.9
-Description-Content-Type: text/markdown

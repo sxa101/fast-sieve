@@ -1,7 +1,0 @@
-pyproject.toml
-fastsieve/__init__.py
-fastsieve/_api.py
-fastsieve.egg-info/PKG-INFO
-fastsieve.egg-info/SOURCES.txt
-fastsieve.egg-info/dependency_links.txt
-fastsieve.egg-info/top_level.txt
