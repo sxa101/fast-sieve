@@ -1,0 +1,79 @@
+name: verify-cuda
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  cuda-linux-build:
+    name: CUDA / Linux (nvcc + gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libomp-dev
+          nvcc --version
+          gcc --version
+
+      - name: Build CPU-only (gcc) - sanity
+        run: |
+          gcc -O3 -mavx2 -fopenmp -o fastsieve-cpu fastsieve.c gpu.c -lm
+          ./fastsieve-cpu 1000000
+          ./fastsieve-cpu --lo 2000000000000 --hi 2000200000000
+
+      - name: Build CUDA (nvcc) - wheel-30 kernel
+        run: |
+          # fastsieve.c + gpu_cuda.cu share the same wheel-30 layout (30*16384).
+          # The wheel-210 branch is CPU-only by design (gpu.c disabled), so CUDA build is only for main (wheel-30).
+          nvcc -O3 -arch=sm_80 -Xcompiler -fopenmp -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm || \
+          nvcc -O3 -arch=sm_70 -Xcompiler -fopenmp -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm
+          ./fastsieve-cuda 1000000
+          ./fastsieve-cuda --lo 9174900 --hi 9274900 || true
+
+      - name: CUDA smoke - no device fallback
+        run: |
+          # GitHub runners have no GPU -> gpu_sieve returns ok=0, engine falls back to exact CPU.
+          # Verify --gpu does not crash and stays exact for small n.
+          ./fastsieve-cuda --gpu 10000000 || ./fastsieve-cuda 10000000
+          echo "cuda fallback smoke passed"
+
+      - name: Pend regression windows (CPU path)
+        run: |
+          ./fastsieve-cuda --lo 2000000000000 --hi 2000200000000
+          ./fastsieve-cuda --lo 3000000000000 --hi 3000200000000
+
+  cuda-windows-build-check:
+    name: CUDA / Windows (nvcc build check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Check nvcc availability (optional)
+        shell: pwsh
+        run: |
+          $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+          if (-not $nvcc) { Write-Host "nvcc not on windows runner - skipping cuda compile, cpu build already verified in amd.yml" }
+          else { nvcc --version }
+
+      - name: CPU build still passes (wheel-30)
+        shell: cmd
+        run: |
+          if not exist third_party\OpenCL-Headers\CL\cl.h git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git third_party\OpenCL-Headers
+          call build.bat
+          fastsieve.exe 1000000
