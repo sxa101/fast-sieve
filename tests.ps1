@@ -38,7 +38,7 @@ foreach ($c in $cases) {
   foreach ($mode in 't1','t12','gpu') {
     $argz = if ($mode -eq 't1')   { '-t','1' }
             elseif ($mode -eq 't12'){ '-t','12' }
-            else                    { '--gpu' }
+            else                    { ,'--gpu' }
     # big quadrat and GPU not needed for the largest ranges to keep the suite quick
     if ($mode -eq 'gpu' -and $n -gt 100000000000) { continue }
     $got = Run-Case $n $argz
