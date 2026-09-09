@@ -1,5 +1,35 @@
 # Wheel-210 experiment – history and findings
 
+## Status (2026-09-09)
+
+* The wheel-210 crossing engine was **revived on branch `wheel210`** and is
+  bit-exact across the full gate (pi sweep to 1e12, single- and multi-thread,
+  the 786431²/786433² boundary primes, spot windows up to 8e15). It remains a
+  branch, **not merged**: measured 1.22–1.45× **slower** than the wheel-30
+  engine here, so the re-landing checklist below is superseded by that
+  branch's write-up (docs/WHEEL210.md on `wheel210`).
+* **CRITICAL (found via the 210 work): the wheel-30 engine on main was wrong
+  above n ≈ 2e12.** The pend-migration decremented the carry index *before*
+  testing `i < B`, pushing a pended prime's first crossing one segment early.
+  Dormant until a prime's first-multiple offset can exceed one segment
+  (p ≳ 1.1M, i.e. n ≳ 1.3e12) — just above the old test ceiling, while the
+  API advertises 8e15. Error (window [n, n+2e8]):
+
+  | n     | error |
+  |-------|------:|
+  | 1.5e12 | 0    |
+  | 2e12  | +678 |
+  | 3e12  | +6,431 |
+  | 5e12  | +24,157 |
+  | 1e13  | +70,048 |
+  | 2e13  | +129,072 |
+  | 8e15  | +5,894,756 |
+
+  Fixed by commit `4ffa6f3` (test `i < B` first, decrement only when not
+  pushed); regression windows above 2e12 added in `cf1688d` (tests.sh /
+  tests.ps1 / api_test.c). Full root-cause write-up: `wheel210` branch,
+  docs/WHEEL210.md.
+
 ## Goal
 
 A mod-210 wheel skips multiples whose quotient is divisible by 7 (in addition
