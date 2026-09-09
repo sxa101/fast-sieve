@@ -72,6 +72,20 @@ cl /O2 /arch:AVX2 /Oi /openmp fastsieve.c gpu.c your_program.c
 # or: build.bat also builds examples/api_demo.c (a self-check demo)
 ```
 
+## Python API
+
+The dependency-free `fastsieve` Python package (in `python/`) wraps the same
+native C API with `ctypes`, including optional per-call GPU and thread
+configuration:
+
+```
+python -m pip install ./python
+```
+
+Build `libfastsieve.so` (Linux) or `fastsieve.dll` (Windows) first and set
+`FASTSIEVE_LIBRARY` if it is not next to the package. See
+[docs/PYTHON.md](docs/PYTHON.md) for build commands and examples.
+
 ## Usage
 
 ```

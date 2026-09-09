@@ -11,3 +11,4 @@ fastsieve_cpu
 debugdump
 blockdiff
 blockcmp
+*.egg-info/
