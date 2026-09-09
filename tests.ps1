@@ -27,6 +27,9 @@ $cases = @(
 
 function Run-Case($n, $argz) {
   if ($env:TESTDBG) { Write-Host ("DBG invoking: {0} {1} {2}" -f $tool, ($argz -join ' '), $n) }
+  # Native stderr (e.g. GPU audit/fallback notices) must not terminate the
+  # suite under $ErrorActionPreference='Stop'; relax it for the native call.
+  $ErrorActionPreference = 'Continue'
   $o = & $tool @argz $n 2>$null | Select-String -Pattern '^pi\('
   if (-not $o) { return $null }
   return [uint64]([regex]::Match($o.Line, '^pi\(\d+\) = (\d+)').Groups[1].Value)
@@ -36,9 +39,9 @@ $fail = 0
 foreach ($c in $cases) {
   $n = $c.n
   foreach ($mode in 't1','t12','gpu') {
-    $argz = if ($mode -eq 't1')   { '-t','1' }
-            elseif ($mode -eq 't12'){ '-t','12' }
-            else                    { ,'--gpu' }
+    if ($mode -eq 't1')      { $argz = '-t','1' }
+    elseif ($mode -eq 't12') { $argz = '-t','12' }
+    else                     { $argz = ,'--gpu' }
     # big quadrat and GPU not needed for the largest ranges to keep the suite quick
     if ($mode -eq 'gpu' -and $n -gt 100000000000) { continue }
     $got = Run-Case $n $argz
