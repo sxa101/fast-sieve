@@ -74,11 +74,12 @@ cl /O2 /arch:AVX2 /Oi /openmp fastsieve.c gpu.c your_program.c
 
 ## Python API
 
-The dependency-free `fastsieve` Python package wraps the same native C API
-with `ctypes`, including optional per-call GPU and thread configuration:
+The dependency-free `fastsieve` Python package (in `python/`) wraps the same
+native C API with `ctypes`, including optional per-call GPU and thread
+configuration:
 
 ```
-python -m pip install .
+python -m pip install ./python
 ```
 
 Build `libfastsieve.so` (Linux) or `fastsieve.dll` (Windows) first and set
