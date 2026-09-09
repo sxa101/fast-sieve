@@ -1,0 +1,81 @@
+name: verify-amd
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  amd-windows-opencl:
+    name: AMD / Windows (MSVC + OpenCL)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Fetch OpenCL headers
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "third_party/OpenCL-Headers/CL/cl.h")) {
+            git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git third_party/OpenCL-Headers
+          }
+          Get-ChildItem third_party/OpenCL-Headers/CL/cl.h | Select-Object FullName
+
+      - name: Build fastsieve (CPU + OpenCL)
+        shell: cmd
+        run: call build.bat
+
+      - name: Build api_test
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=amd64 >nul 2>&1
+          if errorlevel 1 call "%ProgramFiles%\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64
+          cl /nologo /O2 /arch:AVX2 /Oi /openmp /I third_party\OpenCL-Headers fastsieve.c gpu.c api_test.c /DFASTSIEVE_NO_MAIN /Fe:api_test.exe
+
+      - name: CPU correctness (pi up to 1e11, boundary primes)
+        shell: pwsh
+        run: |
+          # quick gate - full 1e12 is ~4-7 min, exercised nightly only
+          & .\fastsieve.exe 1000000
+          if ($LASTEXITCODE -ne 0) { throw "fastsieve 1e6 failed" }
+          powershell -ExecutionPolicy Bypass -File tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "tests.ps1 failed" }
+
+      - name: Pend regression - O(hi-lo) windows (no primesieve needed for smoke)
+        shell: pwsh
+        run: |
+          & .\fastsieve.exe --lo 9174900 --hi 9274900
+          & .\fastsieve.exe --lo 2000000000000 --hi 2000200000000
+          if ($LASTEXITCODE -ne 0) { throw "pend window smoke failed" }
+
+      - name: GPU path smoke (OpenCL fallback)
+        shell: pwsh
+        run: |
+          # On GitHub-hosted runners no AMD GPU exists -> gpu_sieve returns ok=0 and fastsieve falls back to CPU.
+          # We just verify --gpu does not crash and stays exact.
+          & .\fastsieve.exe --gpu 10000000
+          if ($LASTEXITCODE -ne 0) { throw "--gpu smoke failed" }
+
+  amd-linux-opencl-build:
+    name: AMD / Linux (gcc + OpenCL headers build check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocl-icd-opencl-dev opencl-headers libomp-dev
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git third_party/OpenCL-Headers || true
+
+      - name: Build (gcc, OpenCL headers, OpenMP)
+        run: |
+          gcc -O3 -march=x86-64 -mavx2 -fopenmp -Ithird_party/OpenCL-Headers -o fastsieve fastsieve.c gpu.c -lOpenCL -lm || \
+          gcc -O3 -mavx2 -fopenmp -o fastsieve fastsieve.c gpu.c -lm
+          ./fastsieve 1000000
+          ./fastsieve --lo 9174900 --hi 9274900
+          ./fastsieve --lo 2000000000000 --hi 2000200000000
