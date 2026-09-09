@@ -529,11 +529,16 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
         s_big_relink(&st, nd, seg);
       }
     }
-    /* migrate pending primes whose first multiple arrived */
+    /* migrate pending primes whose first multiple arrived.
+       pend.i is in the coordinates of the segment where the prime was
+       ADDED: test BEFORE decrementing. Testing after (i -= B first)
+       pushes the first crossing one segment early - the whole chain then
+       lands at value - span (wheel-30 never hit this below 1e12 because
+       its first-multiple offset 7p < 30B for p <= 1.12M, i.e. n <= ~1.3e12
+       - above main's tested ceiling). Ported from wheel210 c6b2c7f. */
     if (st.npend) {
       u64 w = 0;
       for (u64 x = 0; x < st.npend; x++) {
-        if (st.pend[x].i >= B) st.pend[x].i -= (u32)B;
         u64 pv = 30ull * st.pend[x].sp + (u64)(OFFB[st.pend[x].k] % 30);
         if (st.pend[x].i < B) {
           if (pv <= smallMax)
@@ -541,8 +546,10 @@ static u64 sieve_slice(u64 lo, u64 countLo, u64 cap, u64 B, u64 smallMax, u64 me
           else
             s_med_push(&st, st.pend[x].i, st.pend[x].k, st.pend[x].t, pv);
         }
-        else
+        else {
+          st.pend[x].i -= (u32)B;
           st.pend[w++] = st.pend[x];
+        }
       }
       st.npend = w;
     }

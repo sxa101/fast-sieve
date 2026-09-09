@@ -27,6 +27,20 @@ done
 check "pi(618473717761)" "$($BIN "$@" 618473717761 | awk '/^pi\(/ {print $3}')" "23688293324"
 check "pi(618476863489)" "$($BIN "$@" 618476863489 | awk '/^pi\(/ {print $3}')" "23688409284"
 
+# regression windows >2e12 - exercises pend one-early bug (latent on main until ~1.3e12)
+# interval [lo,hi] uses --lo/--hi slice so cost is O(hi-lo) not O(hi); requires primesieve
+if [ -x "$PS" ]; then
+  for pair in "2000000000000 2000200000000" "3000000000000 3000200000000" "5000000000000 5000200000000"; do
+    set -- $pair; lo=$1; hi=$2
+    want=$($PS "$lo" "$hi" 2>/dev/null | awk '/Primes:/ {print $2}')
+    got=$($BIN --lo "$lo" --hi "$hi" "$@" 2>/dev/null | awk '/pi\(/ {print $NF}')
+    # fastsieve --lo prints "pi([lo, hi]) = N"; extract N
+    if [ -n "$want" ] && [ -n "$got" ]; then
+      check "window [$lo,$hi]" "$got" "$want"
+    fi
+  done
+fi
+
 echo "----------------------------------------"
 echo "pass=$pass fail=$fail"
 [ $fail -eq 0 ]

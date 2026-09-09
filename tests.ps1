@@ -56,6 +56,25 @@ if ($ref) {
     if ($g -eq [uint64]$r) { Write-Host ("PASS ref-diff {0}" -f $n) -ForegroundColor Green }
     else { Write-Host ("FAIL ref-diff {0} ours={1} primesieve={2}" -f $n, $g, $r) -ForegroundColor Red; $fail++ }
   }
+  # regression windows >2e12 - exercises pend one-early bug (main latent until ~1.3e12)
+  # interval [lo,hi] uses --lo/--hi slice so cost is O(hi-lo) not O(hi)
+  $windows = @(
+    @{ lo = 2000000000000; hi = 2000200000000 },
+    @{ lo = 3000000000000; hi = 3000200000000 },
+    @{ lo = 5000000000000; hi = 5000200000000 }
+  )
+  foreach ($w in $windows) {
+    $lo = $w.lo; $hi = $w.hi
+    # primesieve window count: primesieve lo hi returns Primes: <count>
+    $rLine = & $ref.Source $lo $hi 2>$null | Select-String -Pattern 'Primes:'
+    if ($rLine) { $r = [uint64]($rLine.Line -replace '.*Primes:\s*','') } else { continue }
+    $o = & $tool --lo $lo --hi $hi 2>$null | Select-String -Pattern 'pi\('
+    if ($o) {
+      $g = [uint64]([regex]::Match($o.Line, '=\s*(\d+)').Groups[1].Value)
+      if ($g -eq $r) { Write-Host ("PASS window [{0},{1}] = {2}" -f $lo,$hi,$g) -ForegroundColor Green }
+      else { Write-Host ("FAIL window [{0},{1}] got {2} want {3}" -f $lo,$hi,$g,$r) -ForegroundColor Red; $fail++ }
+    }
+  }
 } else { Write-Host "note: tuples of primesieve not found; skip reference differential" -ForegroundColor DarkGray }
 
 Write-Host ("RESULT: {0} failure(s)" -f $fail)
