@@ -33,10 +33,11 @@ jobs:
         run: |
           # fastsieve.c + gpu_cuda.cu share the same wheel-30 layout (30*16384).
           # The wheel-210 branch is CPU-only by design (gpu.c disabled), so CUDA build is only for main (wheel-30).
+          # fastsieve.c uses AVX2 intrinsics (_mm256_*) -> host compiler needs -mavx2
           if command -v nvcc >/dev/null 2>&1; then
-            nvcc -O3 -arch=sm_80 -Xcompiler -fopenmp -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm || \
-            nvcc -O3 -arch=sm_70 -Xcompiler -fopenmp -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm || \
-            nvcc -O3 -Xcompiler -fopenmp -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm
+            nvcc -O3 -arch=sm_80 -Xcompiler "-mavx2 -fopenmp" -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm || \
+            nvcc -O3 -arch=sm_70 -Xcompiler "-mavx2 -fopenmp" -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm || \
+            nvcc -O3 -Xcompiler "-mavx2 -fopenmp" -o fastsieve-cuda fastsieve.c gpu_cuda.cu -lm
             ./fastsieve-cuda 1000000
             ./fastsieve-cuda --lo 9174900 --hi 9274900 || true
           else
