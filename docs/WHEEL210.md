@@ -152,14 +152,24 @@ Measured micro-findings:
 
 ## Follow-up leads (ordered)
 
-1. **Per-segment offset reuse** (attempted, reverted): the per-call
-   `off[48]` build (~200 cycles) still taxes low-multiple primes.  The
-   plan — build once per prime per SEGMENT, let mid-segment chunks
+1. **Per-segment offset reuse** (attempted, partially debugged): build
+   `off[48]/bm[48]` once per prime per SEGMENT, let mid-segment chunks
    overshoot into the next chunk (AND is idempotent), serial-tail only the
-   last chunk — has an UNRESOLVED carried-state bug: the (byte, state)
-   pair desyncs at segment boundaries (probe: byte ≡ 1 mod 6 carried with
-   state 0, which requires byte ≡ 5).  Needs a single-prime cycle-exact
-   simulator before re-attempting; the rest of the design was sound.
+   last chunk.  STATUS: the carried-state desync is SOLVED — the rewrite
+   dropped the `j++` from both serial-tail loops, so the tail repeated
+   step_0 forever, overshot B, and carried an impossible (byte, state)
+   pair (e.g. byte ≡ 1 mod 6 with state 0, which requires byte ≡ 5).
+   With `j++` restored the state machine is consistent at every handoff
+   (probe-verified) and 1e9 is exact.  A SECOND smaller bug remains:
+   ~73 spurious prime-bit clears in the last two segments at n = 2.5e9
+   (undercount −58, growing ~linearly to +57k at 1e10); the med class is
+   store-for-store identical to the reference, the 73 clears are primes
+   (no factor ≤ 60k), starting at byte 0 of segment 271; suspect the
+   drift/rebuild interaction (chunk-6 serial tail → drtab → chunk-7
+   rebuild).  Debug artifacts: ONEP/TAILEXIT/CH7ENTRY/STEP probes,
+   chk_state() full invariant (v % p == 0 at chunk entries), store-set
+   recorder (r271).  exp5 stays unreverted in /tmp/exp5.c; fastsieve.c
+   keeps the verified exp3f state.
 2. Port the pend-migration reordering (bug 6) to main — **confirmed wrong
    there above n ≈ 2e12, see the section above**; the three-line fix is
    verified (main + fix exact at 2e12/2e13).
